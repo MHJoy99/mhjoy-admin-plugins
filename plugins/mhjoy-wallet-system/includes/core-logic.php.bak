@@ -1,0 +1,414 @@
+<?php
+if (!defined('ABSPATH')) {
+    exit;
+}
+
+/**
+ * MHJoy Wallet Core Logic
+ * Handles calculations, RNG, tiers, and business rules.
+ */
+
+// ==================== 1. SPIN-TO-WIN LOGIC ====================
+
+function mhjoy_process_spin_logic($user_email, $is_premium = false)
+{
+    global $wpdb;
+    $t_bal = $wpdb->prefix . 'mhjoy_wallet_balance';
+    $t_spins = $wpdb->prefix . 'mhjoy_spin_history';
+
+    $wpdb->query('START TRANSACTION');
+
+    // 1. Get Wallet with Row Lock (FOR UPDATE is critical)
+    $wallet = $wpdb->get_row($wpdb->prepare("SELECT * FROM $t_bal WHERE user_email = %s FOR UPDATE", $user_email));
+
+    if (!$wallet) {
+        $wpdb->insert($t_bal, ['user_email' => $user_email, 'balance' => 0]);
+        $wallet = (object) ['balance' => 0, 'spin_claimed_today' => 0, 'total_spins' => 0];
+    }
+
+    if (!$is_premium && $wallet->spin_claimed_today >= 1) {
+        $wpdb->query('ROLLBACK');
+        return new WP_Error('limit', 'Daily spin used', ['status' => 403]);
+    }
+
+    // 🛡️ TRIAL LIMIT CHECK
+    if (!$is_premium) {
+        $orders = wc_get_orders(['billing_email' => $user_email, 'limit' => 1, 'status' => ['completed', 'processing'], 'return' => 'ids']);
+        if (empty($orders)) { // User has 0 orders
+            if (mhjoy_get_total_free_earned($user_email) >= 50) {
+                $wpdb->query('ROLLBACK');
+                return new WP_Error('locked', '৳50 Trial Limit reached! Make your first purchase to unlock more rewards.', ['status' => 403]);
+            }
+        }
+    }
+
+    if ($is_premium) {
+        if ($wallet->balance < 10) {
+            $wpdb->query('ROLLBACK');
+            return new WP_Error('funds', 'Need ৳10', ['status' => 402]);
+        }
+        $premium_today = $wpdb->get_var($wpdb->prepare("SELECT COUNT(*) FROM $t_spins WHERE user_email = %s AND spin_date = CURDATE() AND is_premium = 1", $user_email));
+        if ($premium_today >= 10) {
+            $wpdb->query('ROLLBACK');
+            return new WP_Error('limit', 'Max 10 premium spins per day', ['status' => 429]);
+        }
+    }
+
+    $reward = 0;
+    $rand = rand(1, 1000);
+    $cost = $is_premium ? 10 : 0;
+    if ($is_premium) {
+        if ($rand <= 400)
+            $reward = 0;
+        elseif ($rand <= 700)
+            $reward = 5;
+        elseif ($rand <= 900)
+            $reward = 10;
+        elseif ($rand <= 995)
+            $reward = 25;
+        else
+            $reward = 100;
+    } else {
+        if ($rand <= 500)
+            $reward = 0.10;
+        elseif ($rand <= 850)
+            $reward = 0.25;
+        elseif ($rand <= 980)
+            $reward = 1.00;
+        else
+            $reward = 5.00;
+    }
+
+    try {
+        $new_bal = round($wallet->balance - $cost + $reward, 2);
+        $wpdb->update($t_bal, ['balance' => $new_bal, 'spin_claimed_today' => 1, 'last_spin_date' => current_time('mysql')], ['user_email' => $user_email]);
+        $wpdb->insert($t_spins, ['user_email' => $user_email, 'spin_date' => current_time('Y-m-d'), 'spin_time' => current_time('H:i:s'), 'reward_amount' => $reward, 'is_premium' => $is_premium ? 1 : 0]);
+
+        if ($cost > 0)
+            mhjoy_log_transaction($user_email, 'debit', $cost, 'spin', 'Premium Spin Cost', $wallet->balance - $cost);
+        if ($reward > 0)
+            mhjoy_log_transaction($user_email, 'credit', $reward, 'spin', 'Spin Reward', $new_bal);
+
+        $wpdb->query('COMMIT');
+        return ['success' => true, 'reward' => $reward, 'new_balance' => $new_bal, 'message' => "Won ৳$reward!"];
+    } catch (Exception $e) {
+        $wpdb->query('ROLLBACK');
+        return new WP_Error('db_error', 'Failed', ['status' => 500]);
+    }
+}
+
+
+// ==================== 2. LOYALTY TIER LOGIC ====================
+
+function mhjoy_calculate_tier($user_email)
+{
+    global $wpdb;
+
+    // Get total spent from stats table
+    $t_stats = $wpdb->prefix . 'mhjoy_user_statistics';
+    $stats = $wpdb->get_row($wpdb->prepare("SELECT total_spent FROM $t_stats WHERE user_email = %s", $user_email));
+
+    $spent = $stats ? (float) $stats->total_spent : 0.00;
+
+    // Tier Thresholds
+    if ($spent >= 10000)
+        return 'platinum'; // VIP King
+    if ($spent >= 5000)
+        return 'gold';      // Heavy Spender
+    if ($spent >= 1000)
+        return 'silver';    // Regular
+    return 'bronze';                        // Newbie
+}
+
+function mhjoy_update_user_tier($user_email)
+{
+    global $wpdb;
+    $new_tier = mhjoy_calculate_tier($user_email);
+    $t_bal = $wpdb->prefix . 'mhjoy_wallet_balance';
+
+    // Only update if changed (save DB writes)
+    $current = $wpdb->get_var($wpdb->prepare("SELECT loyalty_tier FROM $t_bal WHERE user_email = %s", $user_email));
+
+    if ($current !== $new_tier) {
+        $wpdb->update($t_bal, ['loyalty_tier' => $new_tier], ['user_email' => $user_email]);
+        return $new_tier;
+    }
+    return $current;
+}
+
+// ==================== 3. FRAUD DETECTION LOGIC ====================
+
+function mhjoy_analyze_fraud_risk($user_email, $device_fp, $ip_address)
+{
+    global $wpdb;
+    $score = 0;
+    $reasons = [];
+
+    // Check 1: Multiple Accounts on Same Device
+    $t_redemptions = $wpdb->prefix . 'mhjoy_gift_code_redemptions';
+    $device_count = $wpdb->get_var($wpdb->prepare(
+        "SELECT COUNT(DISTINCT user_email) FROM $t_redemptions WHERE device_fingerprint = %s",
+        $device_fp
+    ));
+
+    if ($device_count > 3) {
+        $score += 50;
+        $reasons[] = "Device used by $device_count accounts";
+    }
+
+    // Check 2: IP Spam
+    $ip_count = $wpdb->get_var($wpdb->prepare(
+        "SELECT COUNT(*) FROM $t_redemptions WHERE ip_address = %s AND redeemed_at > NOW() - INTERVAL 1 HOUR",
+        $ip_address
+    ));
+
+    if ($ip_count > 10) {
+        $score += 40;
+        $reasons[] = "High redemption velocity from IP";
+    }
+
+    // Decision
+    $flag = 'clean';
+    if ($score >= 80)
+        $flag = 'blocked';
+    elseif ($score >= 40)
+        $flag = 'suspicious';
+
+    if ($flag !== 'clean') {
+        $t_bal = $wpdb->prefix . 'mhjoy_wallet_balance';
+        $wpdb->update(
+            $t_bal,
+            ['fraud_flag' => $flag, 'fraud_reason' => implode(', ', $reasons)],
+            ['user_email' => $user_email]
+        );
+    }
+
+    return ['score' => $score, 'flag' => $flag];
+}
+
+// ==================== 4. REFERRAL SYSTEM ====================
+
+function mhjoy_generate_referral_code($user_email)
+{
+    global $wpdb;
+    $t_bal = $wpdb->prefix . 'mhjoy_wallet_balance';
+
+    // Check if exists
+    $existing = $wpdb->get_var($wpdb->prepare("SELECT referral_code FROM $t_bal WHERE user_email = %s", $user_email));
+    if ($existing)
+        return $existing;
+
+    // Generate: First 3 letters + Random Hex
+    $prefix = strtoupper(substr($user_email, 0, 3));
+    $code = $prefix . '-' . strtoupper(substr(md5(uniqid()), 0, 5));
+
+    $wpdb->update($t_bal, ['referral_code' => $code], ['user_email' => $user_email]);
+    return $code;
+}
+// ==================== 5. HEADLESS INTEGRATION (THE BRIDGE) ====================
+// This answers the call from your MHJoy Headless API plugin
+
+add_filter('mhjoy_wallet_apply_balance', 'mhjoy_wallet_execute_deduction', 10, 3);
+
+function mhjoy_wallet_execute_deduction($amount, $email, $order)
+{
+    global $wpdb;
+    $raw_input = file_get_contents('php://input');
+    $data = json_decode($raw_input, true);
+
+    if (empty($data['use_wallet']) || $data['use_wallet'] !== true)
+        return 0;
+
+    $t_bal = $wpdb->prefix . 'mhjoy_wallet_balance';
+    $wallet = $wpdb->get_row($wpdb->prepare("SELECT balance, fraud_flag FROM $t_bal WHERE user_email = %s", $email));
+
+    if (!$wallet || $wallet->balance <= 0 || $wallet->fraud_flag === 'blocked')
+        return 0;
+
+    $order_total = (float) $order->get_total();
+    $deduction = min($order_total, (float) $wallet->balance);
+
+    if ($deduction <= 0)
+        return 0;
+
+    // 🎯 THE FIX: We DON'T update the DB balance here.
+    // We just tag the order so we can deduct it ONLY after payment is successful.
+    $order->update_meta_data('_pending_wallet_deduction', $deduction);
+
+    // Add the visual discount to the order
+    $item_fee = new WC_Order_Item_Fee();
+    $item_fee->set_name('Wallet Balance Used');
+    $item_fee->set_amount(-1 * $deduction);
+    $item_fee->set_total(-1 * $deduction);
+    $item_fee->set_tax_status('none');
+    $order->add_item($item_fee);
+
+    return $deduction;
+}
+// ==================== 🔗 ADVANCED REFERRAL ENGINE ====================
+
+// 1. Hook into WooCommerce Order Completion
+add_action('woocommerce_order_status_completed', 'mhjoy_process_referral_commissions', 10, 1);
+
+function mhjoy_process_referral_commissions($order_id)
+{
+    global $wpdb;
+    $order = wc_get_order($order_id);
+    $referee_email = $order->get_billing_email();
+    $order_total = (float) $order->get_total();
+    if ($order_total < 100)
+        return;
+
+    $t_bal = $wpdb->prefix . 'mhjoy_wallet_balance';
+    $t_stats = $wpdb->prefix . 'mhjoy_user_statistics';
+
+    $referee_data = $wpdb->get_row($wpdb->prepare("SELECT referred_by FROM $t_bal WHERE user_email = %s", $referee_email));
+    if (!$referee_data || empty($referee_data->referred_by))
+        return;
+    $referrer_email = $referee_data->referred_by;
+
+    $wpdb->query('START TRANSACTION');
+    $count = $wpdb->get_var($wpdb->prepare("SELECT COUNT(*) FROM $t_bal WHERE referred_by = %s", $referrer_email));
+    $rate = ($count >= 31) ? 0.015 : (($count >= 11) ? 0.010 : 0.005);
+    $commission = min($order_total * $rate, 50);
+
+    $total_spent = $wpdb->get_var($wpdb->prepare("SELECT total_spent FROM $t_stats WHERE user_email = %s FOR UPDATE", $referee_email));
+    $is_first_unlock = ($total_spent >= 300 && ($total_spent - $order_total) < 300);
+    $payout = round($commission + ($is_first_unlock ? 15 : 0), 2);
+
+    if ($payout > 0) {
+        $referrer_wallet = $wpdb->get_row($wpdb->prepare("SELECT balance FROM $t_bal WHERE user_email = %s FOR UPDATE", $referrer_email));
+        $new_bal = round($referrer_wallet->balance + $payout, 2);
+        $wpdb->update($t_bal, ['balance' => $new_bal], ['user_email' => $referrer_email]);
+        $note = $is_first_unlock ? "Milestone + Comm" : "Passive Comm";
+        mhjoy_log_transaction($referrer_email, 'credit', $payout, 'referral', "$referee_email: $note", $new_bal);
+    }
+    $wpdb->query('COMMIT');
+}
+
+// 7. Endpoint to Link a Referral (When a user enters a code)
+function mhjoy_apply_referral_code($referee_email, $code)
+{
+    global $wpdb;
+    $t_bal = $wpdb->prefix . 'mhjoy_wallet_balance';
+
+    // 🎯 FIX: Search for the code without forcing case-sensitivity
+    $referrer = $wpdb->get_row($wpdb->prepare(
+        "SELECT user_email FROM $t_bal WHERE referral_code = %s",
+        sanitize_text_field($code)
+    ));
+
+    if (!$referrer) {
+        return new WP_Error('invalid_code', 'This referral code does not exist.', ['status' => 400]);
+    }
+
+    // 🎯 FIX: Better message for Self-Referral
+    if (strtolower($referrer->user_email) === strtolower($referee_email)) {
+        return new WP_Error('self_referral', 'You cannot link to your own partner code!', ['status' => 400]);
+    }
+
+    // Check if referee already has a referrer
+    $already_referred = $wpdb->get_var($wpdb->prepare("SELECT referred_by FROM $t_bal WHERE user_email = %s", $referee_email));
+    if ($already_referred) {
+        return new WP_Error('already_linked', 'Your account is already linked to a partner.', ['status' => 400]);
+    }
+
+    $wpdb->update($t_bal, ['referred_by' => $referrer->user_email], ['user_email' => $referee_email]);
+    return true;
+}
+// THE SIMPLE TRIGGER
+add_action('woocommerce_payment_complete', 'mhjoy_process_wallet_topup', 10, 1);
+
+function mhjoy_process_wallet_topup($order_id)
+{
+    global $wpdb;
+    $order = wc_get_order($order_id);
+
+    // Check if it's a top-up and NOT already credited
+    if (!$order || $order->get_meta('_is_wallet_topup') !== 'yes' || $order->get_meta('_credited') === 'yes')
+        return;
+
+    $email = $order->get_billing_email();
+    $amount = (float) $order->get_total();
+
+    // Bonus math
+    $bonus = ($amount >= 5000) ? 0.05 : (($amount >= 1000) ? 0.03 : (($amount >= 500) ? 0.02 : 0));
+    $total = round($amount + ($amount * $bonus), 2);
+
+    $t_bal = $wpdb->prefix . 'mhjoy_wallet_balance';
+    $wpdb->query('START TRANSACTION');
+
+    $curr = $wpdb->get_var($wpdb->prepare("SELECT balance FROM $t_bal WHERE user_email = %s FOR UPDATE", $email));
+    $new = round(($curr ?: 0) + $total, 2);
+
+    $wpdb->update($t_bal, ['balance' => $new], ['user_email' => $email]);
+
+    // Mark as done so we don't add money twice
+    $order->update_meta_data('_credited', 'yes');
+    $order->save();
+
+    // Log the transaction
+    if (function_exists('mhjoy_log_transaction')) {
+        mhjoy_log_transaction($email, 'credit', $total, 'topup', "Top-up Order #$order_id", $new);
+    }
+
+    $wpdb->query('COMMIT');
+}
+
+// 🎯 THE FINAL CHARGE: This fires only when money is confirmed
+add_action('woocommerce_payment_complete', 'mhjoy_final_wallet_deduction_trigger', 5, 1);
+
+function mhjoy_final_wallet_deduction_trigger($order_id)
+{
+    global $wpdb;
+    $order = wc_get_order($order_id);
+
+    // 1. Check if there is a pending deduction
+    $deduction = (float) $order->get_meta('_pending_wallet_deduction');
+    $is_processed = $order->get_meta('_wallet_deduction_done');
+
+    if ($deduction <= 0 || $is_processed === 'yes')
+        return;
+
+    $email = $order->get_billing_email();
+    $t_bal = $wpdb->prefix . 'mhjoy_wallet_balance';
+
+    $wpdb->query('START TRANSACTION');
+
+    // 2. Lock and take the money for real
+    $current_bal = $wpdb->get_var($wpdb->prepare("SELECT balance FROM $t_bal WHERE user_email = %s FOR UPDATE", $email));
+
+    // Safety check: if they spent the money in another tab while this order was pending
+    $actual_deduction = min($current_bal, $deduction);
+    $new_bal = round($current_bal - $actual_deduction, 2);
+
+    $wpdb->update($t_bal, ['balance' => $new_bal], ['user_email' => $email]);
+
+    // 3. Mark as done
+    $order->update_meta_data('_wallet_deduction_done', 'yes');
+    $order->add_order_note("💳 Wallet Finalized: Deducted ৳{$actual_deduction}. New Balance: ৳{$new_bal}");
+    $order->save();
+
+    // 📜 Log to Audit Ledger
+    if (function_exists('mhjoy_log_transaction')) {
+        mhjoy_log_transaction($email, 'debit', $actual_deduction, 'order', "Order #$order_id Finalized", $new_bal);
+    }
+
+    $wpdb->query('COMMIT');
+}
+
+/**
+ * Helper: Calculate total free money earned by user
+ */
+function mhjoy_get_total_free_earned($email)
+{
+    global $wpdb;
+    $table = $wpdb->prefix . 'mhjoy_wallet_transactions';
+    return (float) $wpdb->get_var($wpdb->prepare(
+        "SELECT SUM(amount) FROM $table 
+         WHERE user_email = %s 
+         AND type = 'credit' 
+         AND (source = 'daily' OR (source = 'spin' AND reference = 'Free Win'))",
+        $email
+    )) ?: 0;
+}

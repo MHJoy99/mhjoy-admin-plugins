@@ -1,0 +1,1508 @@
+<?php
+/**
+ * Plugin Name: MHJoy Headless API
+ * Plugin URI: https://mhjoygamershub.com
+ * Description: Custom REST API endpoints for React headless frontend with WooCommerce integration
+ * Version: 1.1.0
+ * Author: MHJoyGamersHub
+ * Author URI: https://mhjoygamershub.com
+ * License: GPL v2 or later
+ * License URI: https://www.gnu.org/licenses/gpl-2.0.html
+ * Text Domain: mhjoy-api
+ * Requires at least: 5.8
+ * Requires PHP: 7.4
+ * WC requires at least: 5.0
+ * WC tested up to: 9.0
+ */
+
+if (!defined('ABSPATH')) {
+    exit; // Exit if accessed directly
+}
+
+// Plugin version
+define('MHJOY_API_VERSION', '1.1.0');
+
+// DLM API KEYS
+define('DLM_API_URL', get_site_url() . '/wp-json/dlm/v1');
+define('DLM_CONSUMER_KEY', 'ck_82b63277a9301ff7c337ee2b37516c16fad94763');
+define('DLM_CONSUMER_SECRET', 'cs_f1aa65d596cfe274fc62132d596ef809098f9c72');
+
+/**
+ * Declare compatibility with WooCommerce features
+ */
+add_action('before_woocommerce_init', function () {
+    if (class_exists('\Automattic\WooCommerce\Utilities\FeaturesUtil')) {
+        \Automattic\WooCommerce\Utilities\FeaturesUtil::declare_compatibility('custom_order_tables', __FILE__, true);
+        \Automattic\WooCommerce\Utilities\FeaturesUtil::declare_compatibility('cart_checkout_blocks', __FILE__, true);
+    }
+});
+
+/**
+ * Check if WooCommerce is active
+ */
+function mhjoy_check_woocommerce()
+{
+    if (!class_exists('WooCommerce')) {
+        add_action('admin_notices', function () {
+            echo '<div class="notice notice-error"><p><strong>MHJoy Headless API</strong> requires WooCommerce to be installed and activated.</p></div>';
+        });
+        return false;
+    }
+    return true;
+}
+add_action('plugins_loaded', 'mhjoy_check_woocommerce');
+
+/**
+ * CORS Headers for Headless Frontend
+ */
+add_action('init', 'mhjoy_handle_cors');
+function mhjoy_handle_cors()
+{
+    $origin = 'https://mhjoygamershub.com';
+    header('Access-Control-Allow-Origin: ' . $origin);
+    header('Access-Control-Allow-Methods: POST, GET, OPTIONS, PUT, DELETE');
+    header('Access-Control-Allow-Headers: Authorization, Content-Type, X-WP-Nonce, RT-UDDOKTAPAY-API-KEY, X-Device-FP, x-device-fp');
+    header('Access-Control-Allow-Credentials: true');
+
+    if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
+        status_header(200);
+        exit();
+    }
+}
+
+/**
+ * Custom Return URL for UddoktaPay
+ */
+add_filter('woocommerce_get_return_url', 'mhjoy_custom_return_url', 10, 2);
+function mhjoy_custom_return_url($url, $order)
+{
+    if ('uddoktapay' === $order->get_payment_method()) {
+        return 'https://mhjoygamershub.com/cart?status=success&order_id=' . $order->get_id();
+    }
+    return $url;
+}
+
+/**
+ * Allow Guest Payment with Order Key
+ */
+add_filter('user_has_cap', 'mhjoy_allow_payment_with_order_key', 10, 3);
+function mhjoy_allow_payment_with_order_key($allcaps, $caps, $args)
+{
+    if (isset($caps[0]) && $caps[0] === 'pay_for_order') {
+        $order_id = isset($args[2]) ? $args[2] : null;
+        if ($order_id) {
+            $order = wc_get_order($order_id);
+            $key = isset($_GET['key']) ? $_GET['key'] : get_query_var('key');
+            if ($order && $key && $order->get_order_key() === $key) {
+                $allcaps['pay_for_order'] = true;
+            }
+        }
+    }
+    return $allcaps;
+}
+
+/**
+ * Register REST API Routes
+ */
+add_action('rest_api_init', function () {
+    register_rest_route('custom/v1', '/create-order', [
+        'methods' => 'POST',
+        'callback' => 'mhjoy_handle_create_order',
+        'permission_callback' => '__return_true'
+    ]);
+
+    register_rest_route('custom/v1', '/verify-payment', [
+        'methods' => 'POST',
+        'callback' => 'mhjoy_handle_verify_payment',
+        'permission_callback' => '__return_true'
+    ]);
+
+    register_rest_route('custom/v1', '/register-customer', [
+        'methods' => 'POST',
+        'callback' => 'mhjoy_handle_register',
+        'permission_callback' => '__return_true'
+    ]);
+
+    register_rest_route('custom/v1', '/login', [
+        'methods' => 'POST',
+        'callback' => 'mhjoy_handle_login',
+        'permission_callback' => '__return_true'
+    ]);
+
+    register_rest_route('custom/v1', '/get-profile', [
+        'methods' => 'POST',
+        'callback' => 'mhjoy_handle_get_profile',
+        'permission_callback' => '__return_true'
+    ]);
+
+    register_rest_route('custom/v1', '/update-profile', [
+        'methods' => 'POST',
+        'callback' => 'mhjoy_handle_update_profile',
+        'permission_callback' => '__return_true'
+    ]);
+
+    register_rest_route('custom/v1', '/reset-password', [
+        'methods' => 'POST',
+        'callback' => 'mhjoy_handle_reset_password',
+        'permission_callback' => '__return_true'
+    ]);
+
+    register_rest_route('custom/v1', '/contact', [
+        'methods' => 'POST',
+        'callback' => 'mhjoy_handle_contact',
+        'permission_callback' => '__return_true'
+    ]);
+
+    register_rest_route('custom/v1', '/my-orders', [
+        'methods' => 'POST',
+        'callback' => 'mhjoy_handle_my_orders',
+        'permission_callback' => '__return_true'
+    ]);
+
+    register_rest_route('custom/v1', '/track-order', [
+        'methods' => 'POST',
+        'callback' => 'mhjoy_handle_track_order',
+        'permission_callback' => '__return_true'
+    ]);
+
+    // 🔐 OTP Email Verification Routes
+    register_rest_route('custom/v1', '/send-otp', [
+        'methods' => 'POST',
+        'callback' => 'mhjoy_send_otp_handler',
+        'permission_callback' => '__return_true',
+    ]);
+
+
+    register_rest_route('custom/v1', '/verify-otp', [
+        'methods' => 'POST',
+        'callback' => 'mhjoy_verify_otp_handler',
+        'permission_callback' => '__return_true',
+    ]);
+    // 🆕 ADD THIS NEW ROUTE HERE ⬇️
+    register_rest_route('custom/v1', '/recent-sales', [
+        'methods' => 'GET',
+        'callback' => 'mhjoy_handle_recent_sales',
+        'permission_callback' => '__return_true'
+    ]);
+    // 🆕 VIP STATUS ENDPOINT
+    register_rest_route('custom/v1', '/wallet/vip-status', [
+        'methods' => 'GET',
+        'callback' => 'mhjoy_handle_vip_status',
+        'permission_callback' => '__return_true'
+    ]);
+    register_rest_route('custom/v1', '/wallet/init-topup', [
+        'methods' => 'POST',
+        'callback' => 'mhjoy_handle_wallet_topup_init',
+        'permission_callback' => '__return_true'
+    ]);
+    // 1. Register Route
+    register_rest_route('custom/v1', '/wallet/verify-topup', [
+        'methods' => 'POST',
+        'callback' => 'mhjoy_handle_verify_topup',
+        'permission_callback' => '__return_true'
+    ]);
+});
+
+// 🆕 ADD THIS ENTIRE FUNCTION HERE ⬇️
+/**
+ * API Endpoint: Recent Sales for Social Proof
+ */
+function mhjoy_handle_recent_sales($request)
+{
+    $args = [
+        'limit' => 15,
+        'status' => 'completed',
+        'orderby' => 'date',
+        'order' => 'DESC'
+    ];
+
+    $orders = wc_get_orders($args);
+    $sales_data = [];
+
+    foreach ($orders as $order) {
+        // Get first item from order
+        $items = $order->get_items();
+        if (empty($items))
+            continue;
+
+        $item = reset($items); // First product
+        $product_id = $item->get_product_id();
+        $product = wc_get_product($product_id);
+
+        if (!$product)
+            continue;
+
+        // Get customer info
+        $first_name = $order->get_billing_first_name();
+        $city = $order->get_billing_city();
+
+        // Mask first name (privacy: "John" → "J***")
+        $masked_name = !empty($first_name) ? mb_substr($first_name, 0, 1) . str_repeat('*', max(3, mb_strlen($first_name) - 1)) : 'Customer';
+
+        // Get product image
+        $image_id = $product->get_image_id();
+        $product_image = $image_id ? wp_get_attachment_url($image_id) : 'https://placehold.co/100x100/0f172a/06b6d4/png?text=Product';
+
+        // Calculate time ago
+        $order_date = $order->get_date_created();
+        $time_diff = current_time('timestamp') - $order_date->getTimestamp();
+
+        if ($time_diff < 60) {
+            $time_ago = 'Just now';
+        } elseif ($time_diff < 3600) {
+            $minutes = floor($time_diff / 60);
+            $time_ago = $minutes . ' minute' . ($minutes > 1 ? 's' : '') . ' ago';
+        } elseif ($time_diff < 86400) {
+            $hours = floor($time_diff / 3600);
+            $time_ago = $hours . ' hour' . ($hours > 1 ? 's' : '') . ' ago';
+        } else {
+            $days = floor($time_diff / 86400);
+            $time_ago = $days . ' day' . ($days > 1 ? 's' : '') . ' ago';
+        }
+
+        $sales_data[] = [
+            'first_name' => $masked_name,
+            'city' => !empty($city) ? $city : 'Bangladesh',
+            'product_name' => $product->get_name(),
+            'product_image' => $product_image,
+            'time_ago' => $time_ago
+        ];
+    }
+
+    return new WP_REST_Response($sales_data, 200);
+}
+// 🆕 END OF NEW FUNCTION ⬆️
+
+/**
+ * Utility: Decrypt License Keys
+ */
+function mhjoy_safe_b64_decrypt($raw)
+{
+    if (!is_string($raw))
+        return $raw;
+    if (strpos($raw, 'def50') !== 0)
+        return $raw;
+
+    $secrets = [get_option('lmfwc_secret_key'), get_option('dlm_secret_key')];
+    $payload = substr($raw, 5);
+    $decoded = base64_decode($payload);
+
+    if (!$decoded)
+        return false;
+
+    foreach ($secrets as $secret) {
+        if (!$secret)
+            continue;
+        $iv_len = openssl_cipher_iv_length('aes-256-cbc');
+        $iv = substr($decoded, 0, $iv_len);
+        $cipher = substr($decoded, $iv_len);
+        $dec = openssl_decrypt($cipher, 'aes-256-cbc', $secret, 0, $iv);
+        if ($dec) {
+            $uns = @unserialize($dec);
+            return $uns !== false ? $uns : $dec;
+        }
+    }
+    return false;
+}
+
+/**
+ * Validate calculation tokens from meta_data (supports multiple bundles)
+ */
+function mhjoy_validate_calculation_token($line_items, $root_token = null, $root_currency = null)
+{
+    $product_id = 9371; // Your gift card product ID
+
+    foreach ($line_items as $item) {
+        // Check if this is a gift card product
+        if (isset($item['product_id']) && $item['product_id'] == $product_id) {
+
+            // PRIORITY 1: Check metadata for token (NEW multi-bundle method)
+            $token = null;
+            $currency = null;
+            if (isset($item['meta_data']) && is_array($item['meta_data'])) {
+                foreach ($item['meta_data'] as $meta) {
+                    if ($meta['key'] == '_calculation_token') {
+                        $token = $meta['value'];
+                    }
+                    if ($meta['key'] == '_calculator_currency') {
+                        $currency = $meta['value'];
+                    }
+                }
+            }
+
+            // PRIORITY 2: Fall back to root token (OLD single-bundle method - backward compatibility)
+            if (empty($token) && !empty($root_token)) {
+                $token = $root_token;
+                $currency = $root_currency;
+                error_log("Using root-level token (legacy). Item variation_id: " . $item['variation_id']);
+            }
+
+            // VALIDATION: Token required for all gift card items
+            if (empty($token)) {
+                error_log("🚨 SECURITY ALERT: Missing calculation token for variation_id: " . $item['variation_id']);
+                return new WP_Error('missing_token', 'Security validation failed: Missing calculation token for gift card', ['status' => 403]);
+            }
+
+            // DECODE TOKEN
+            if (function_exists('mhjoy_verify_price_token')) {
+                $decoded = mhjoy_verify_price_token($token);
+
+                if (!$decoded) {
+                    error_log("❌ Token decode failed for variation_id: " . $item['variation_id']);
+                    return new WP_Error('invalid_token', 'Security validation failed: Invalid or expired token', ['status' => 403]);
+                }
+
+                // 🔍 DEBUG: Log what's in the token vs what's being sent
+                error_log("🔍 TOKEN DEBUG:");
+                error_log("Token contains: " . json_encode($decoded));
+                error_log("Cart item: variation_id={$item['variation_id']}, quantity={$item['quantity']}");
+
+                // VALIDATE: Variation ID matches (allow quantity multiples)
+                if (isset($decoded['items']) && is_array($decoded['items'])) {
+                    $found = false;
+
+                    foreach ($decoded['items'] as $token_item) {
+                        error_log("🔍 Checking token item: " . json_encode($token_item));
+
+                        // Check if variation matches
+                        if ($token_item['variation_id'] == $item['variation_id']) {
+                            // Allow exact match OR multiples (e.g., token has qty 1, cart has qty 2)
+                            $token_qty = $token_item['quantity'];
+                            $cart_qty = $item['quantity'];
+
+                            error_log("🔍 Variation match! Token qty: {$token_qty}, Cart qty: {$cart_qty}");
+
+                            // Cart quantity must be a multiple of token quantity
+                            if ($cart_qty % $token_qty == 0) {
+                                $found = true;
+                                error_log("✅ VALID: Cart qty {$cart_qty} is a multiple of token qty {$token_qty}");
+                                break;
+                            } else {
+                                error_log("❌ INVALID: Cart qty {$cart_qty} is NOT a multiple of token qty {$token_qty}");
+                            }
+                        }
+                    }
+
+                    if (!$found) {
+                        error_log("🚨 SECURITY ALERT: Item not found in token or invalid quantity");
+                        error_log("Looking for: variation_id={$item['variation_id']}, quantity={$item['quantity']}");
+
+                        // Return debug info in error
+                        return new WP_Error('item_mismatch', '🚨 Price Tampering Detected: Claimed price does not match calculated price', [
+                            'status' => 403,
+                            'debug' => [
+                                'cart_item' => [
+                                    'variation_id' => $item['variation_id'],
+                                    'quantity' => $item['quantity'],
+                                ],
+                                'token_items' => $decoded['items'] ?? [],
+                            ]
+                        ]);
+                    }
+                }
+
+                // VALIDATE: Currency matches (critical for price validation)
+                if (!empty($currency)) {
+                    $token_currency = isset($decoded['currency']) ? strtoupper($decoded['currency']) : 'USD';
+                    $request_currency = strtoupper($currency);
+
+                    if ($token_currency != $request_currency) {
+                        error_log("🚨 SECURITY ALERT: Currency mismatch. Token: {$token_currency}, Sent: {$request_currency}");
+                        return new WP_Error('currency_mismatch', 'Security validation failed: Currency mismatch detected', ['status' => 403]);
+                    }
+                }
+
+                error_log("✅ Token validated for variation_id: {$item['variation_id']} ({$item['quantity']}x) - {$currency}");
+
+            } else {
+                error_log("⚠️ Gift Card Control Center plugin not active - skipping token decode");
+            }
+        }
+    }
+
+    return true; // All validations passed
+}
+
+/**
+ * Process Orders Response with License Keys
+ */
+function mhjoy_process_orders_response($orders)
+{
+    $response_data = [];
+    global $wpdb;
+
+    $tbl_dlm = $wpdb->prefix . 'dlm_licenses';
+    $has_dlm = $wpdb->get_var("SHOW TABLES LIKE '$tbl_dlm'") == $tbl_dlm;
+
+    foreach ($orders as $order) {
+        $order_id = $order->get_id();
+        $status = $order->get_status();
+
+        // Only show keys for paid orders
+        $show_keys = in_array($status, ['completed', 'processing']);
+
+        $items_data = [];
+
+        // Fetch license keys via DLM API
+        $api_keys_map = [];
+        if ($show_keys) {
+            $url = DLM_API_URL . '/licenses?order_id=' . $order_id . '&consumer_key=' . DLM_CONSUMER_KEY . '&consumer_secret=' . DLM_CONSUMER_SECRET;
+            $api_res = wp_remote_get($url, ['timeout' => 5, 'sslverify' => false]);
+
+            if (!is_wp_error($api_res) && wp_remote_retrieve_response_code($api_res) == 200) {
+                $json = json_decode(wp_remote_retrieve_body($api_res), true);
+                $list = isset($json['data']) ? $json['data'] : (is_array($json) ? $json : []);
+                foreach ($list as $lic) {
+                    if (isset($lic['product_id'])) {
+                        $k = !empty($lic['decrypted_license_key']) ? $lic['decrypted_license_key'] : $lic['license_key'];
+                        $api_keys_map[$lic['product_id']][] = $k;
+                    }
+                }
+            }
+        }
+
+        foreach ($order->get_items() as $item_id => $item) {
+            $product_id = $item->get_product_id();
+            $keys = [];
+
+            if ($show_keys) {
+                if (isset($api_keys_map[$product_id])) {
+                    $keys = $api_keys_map[$product_id];
+                }
+                if (empty($keys) && $has_dlm) {
+                    $rows = $wpdb->get_results($wpdb->prepare("SELECT license_key FROM $tbl_dlm WHERE order_id = %d AND product_id = %d", $order_id, $product_id));
+                    if ($rows) {
+                        foreach ($rows as $r) {
+                            $dec = mhjoy_safe_b64_decrypt($r->license_key);
+                            if ($dec)
+                                $keys[] = $dec;
+                        }
+                    }
+                }
+                if (empty($keys)) {
+                    $val = wc_get_order_item_meta($item_id, 'lmfwc_license_key', true);
+                    if ($val) {
+                        $dec = mhjoy_safe_b64_decrypt($val);
+                        if ($dec)
+                            $keys[] = $dec;
+                    }
+                }
+            }
+
+            $img = wp_get_attachment_url(get_post_thumbnail_id($product_id)) ?: 'https://placehold.co/400x600/0f172a/06b6d4/png?text=MHJoy+GamersHub';
+
+            $items_data[] = [
+                'name' => $item->get_name(),
+                'quantity' => $item->get_quantity(),
+                'image' => $img,
+                'license_keys' => array_unique($keys)
+            ];
+        }
+
+        $response_data[] = [
+            'id' => $order_id,
+            'status' => $status,
+            'total' => $order->get_total(),
+            'date_created' => $order->get_date_created()->date('Y-m-d'),
+            'items' => $items_data
+        ];
+    }
+
+    return $response_data;
+}
+
+/**
+ * API Endpoint: Create Order (WITH MULTI-BUNDLE TOKEN VALIDATION)
+ */
+function mhjoy_handle_create_order($request)
+{
+    $data = $request->get_json_params();
+    $billing = $data['billing'];
+
+    try {
+        // --- 🔐 SECURITY: TOKEN VALIDATION (MULTI-BUNDLE SUPPORT) --- //
+
+        // Extract root-level tokens (for backward compatibility)
+        $root_token = isset($data['calculation_token']) ? sanitize_text_field($data['calculation_token']) : null;
+        $root_currency = isset($data['calculator_currency']) ? sanitize_text_field($data['calculator_currency']) : null;
+
+        // Validate tokens (checks both meta_data and root level)
+        $token_validation = mhjoy_validate_calculation_token(
+            $data['line_items'],
+            $root_token,
+            $root_currency
+        );
+
+        if (is_wp_error($token_validation)) {
+            return $token_validation; // Return 403 error
+        }
+
+        // If validation passed and we have analytics function, log the data
+        if ($root_token && function_exists('mhjoy_log_calculator_request')) {
+            // Get validated data for analytics
+            if (function_exists('mhjoy_verify_price_token')) {
+                $validated = mhjoy_verify_price_token($root_token);
+                if ($validated) {
+                    mhjoy_log_calculator_request([
+                        'product_id' => isset($data['calculator_product_id']) ? $data['calculator_product_id'] : 9371,
+                        'requested_amount' => isset($data['calculator_amount']) ? $data['calculator_amount'] : 0,
+                        'actual_amount' => $validated['actual_amount'] ?? 0,
+                        'input_currency' => $root_currency ?? 'USD',
+                        'product_currency' => $validated['currency'] ?? 'USD',
+                        'match_type' => $validated['match_type'] ?? 'exact',
+                        'total_bdt' => $validated['total_bdt'] ?? 0,
+                    ]);
+                }
+            }
+        }
+
+        // 🎯 CRITICAL FIX: Different logic for calculator vs non-calculator orders
+
+        if ($root_token) {
+            // CALCULATOR ORDER WITH VALID TOKEN
+            // Token is the authority - skip ALL legacy validations
+            error_log("✅ Calculator order with valid token - skipping DB price tampering check");
+        } else {
+            // NON-CALCULATOR ORDER
+            // Legacy behavior: Must validate prices against database
+            error_log("⚠️ Non-calculator order - validating prices against database");
+
+            // --- LEGACY SECURITY CHECK (For non-calculator orders) ---
+            // Calculate what the Real DB price should be
+            $server_calculated_total = 0;
+            $total_quantity = 0;
+            foreach ($data['line_items'] as $item) {
+                $vid = !empty($item['variation_id']) ? absint($item['variation_id']) : 0;
+                $pid = absint($item['product_id']);
+                $qty = absint($item['quantity']);
+
+                $product = $vid ? wc_get_product($vid) : wc_get_product($pid);
+                if ($product) {
+                    $real_price = (float) $product->get_price();
+                    $server_calculated_total += $real_price * $qty;
+                    $total_quantity += $qty;
+                }
+            }
+
+            // Analyze the Discount (Negative Fees)
+            $requested_discount = 0;
+            if (!empty($data['fee_lines'])) {
+                foreach ($data['fee_lines'] as $fee) {
+                    $amount = floatval($fee['total']);
+                    if ($amount < 0) {
+                        $requested_discount += abs($amount);
+                    }
+                }
+            }
+
+            // Max allowed discount (only for non-calculator orders)
+            $max_allowed_discount = 0;
+            if ($total_quantity > 1) {
+                $max_allowed_discount = ($total_quantity - 1) * 120;
+            }
+
+            // 🔍 DEBUG: Return detailed info if discount check fails
+            if ($requested_discount > $max_allowed_discount + 5) {
+                return new WP_Error('security_alert', "Security Check Failed: Discount amount {$requested_discount} exceeds allowed limit {$max_allowed_discount} for this quantity.", [
+                    'status' => 400,
+                    'debug' => [
+                        'has_root_token' => !empty($root_token),
+                        'total_quantity' => $total_quantity,
+                        'requested_discount' => $requested_discount,
+                        'max_allowed_discount' => $max_allowed_discount,
+                        'server_calculated_total' => $server_calculated_total,
+                        'fee_lines' => $data['fee_lines'] ?? [],
+                        'line_items_count' => count($data['line_items']),
+                    ]
+                ]);
+            }
+
+            // Minimum order total
+            $final_projected_total = $server_calculated_total - $requested_discount;
+            if ($final_projected_total < 10) {
+                return new WP_Error('security_alert', 'Order total too low.', ['status' => 400]);
+            }
+        }
+
+        // --- 🛡️ SECURITY CHECKS PASSED - CREATE ORDER --- //
+
+        $order = wc_create_order();
+
+        // Add Products
+        foreach ($data['line_items'] as $item) {
+            $product_id = absint($item['product_id']);
+            $quantity = absint($item['quantity']);
+            $variation_id = !empty($item['variation_id']) ? absint($item['variation_id']) : 0;
+
+            if ($variation_id > 0) {
+                $product = wc_get_product($variation_id);
+            } else {
+                $product = wc_get_product($product_id);
+            }
+
+            if (!$product)
+                continue;
+
+            $item_id = $order->add_product($product, $quantity);
+
+            // 🎯 CTO FIX: Force Calculated Price for Dynamic Items
+            if (isset($item['unitPriceBdt']) && floatval($item['unitPriceBdt']) > 0) {
+                $item_obj = $order->get_item($item_id);
+                $custom_price = floatval($item['unitPriceBdt']);
+                $item_obj->set_subtotal($custom_price * $quantity);
+                $item_obj->set_total($custom_price * $quantity);
+                $item_obj->save();
+            }
+
+            // Add meta_data to order item if present
+            if ($item_id && !empty($item['meta_data'])) {
+                foreach ($item['meta_data'] as $meta) {
+                    wc_add_order_item_meta($item_id, $meta['key'], $meta['value']);
+                }
+            }
+        }
+
+        // Apply Fees
+        if (!empty($data['fee_lines'])) {
+            foreach ($data['fee_lines'] as $fee) {
+                $item_fee = new WC_Order_Item_Fee();
+                $item_fee->set_name(sanitize_text_field($fee['name']));
+                $item_fee->set_amount(floatval($fee['total']));
+                $item_fee->set_total(floatval($fee['total']));
+                $item_fee->set_tax_status('none');
+                $order->add_item($item_fee);
+            }
+        }
+
+        $order->set_address($billing, 'billing');
+
+        if (!empty($data['customer_id'])) {
+            $order->set_customer_id(absint($data['customer_id']));
+        }
+
+        $order->set_payment_method(sanitize_text_field($data['payment_method']));
+
+        if ($data['payment_method'] === 'manual') {
+            if (!empty($data['trxId']))
+                $order->update_meta_data('transaction_id', sanitize_text_field($data['trxId']));
+            if (!empty($data['senderNumber']))
+                $order->update_meta_data('sender_number', sanitize_text_field($data['senderNumber']));
+        }
+
+        if (!empty($data['coupon_lines'])) {
+            foreach ($data['coupon_lines'] as $coupon) {
+                $order->apply_coupon(sanitize_text_field($coupon['code']));
+            }
+        }
+
+        $guest_token = bin2hex(random_bytes(16));
+        $order->update_meta_data('_headless_guest_token', $guest_token);
+
+        // Store calculator token in order meta for audit trail
+        if ($root_token) {
+            $order->update_meta_data('_calculator_token_used', 'yes');
+            $order->update_meta_data('_calculator_product_id', isset($data['calculator_product_id']) ? $data['calculator_product_id'] : 9371);
+            $order->update_meta_data('_calculator_amount', isset($data['calculator_amount']) ? $data['calculator_amount'] : 0);
+        }
+
+        $order->calculate_totals();
+
+        // (moved below wallet logic)
+
+        // ⭐ APPLY WALLET BALANCE (if email provided)
+        if (!empty($billing['email'])) {
+            $wallet_applied = apply_filters('mhjoy_wallet_apply_balance', 0, $billing['email'], $order);
+            if ($wallet_applied > 0) {
+                // Recalculate after wallet discount
+                $order->calculate_totals();
+                error_log("💰 WALLET APPLIED: {$wallet_applied} BDT for {$billing['email']}");
+            }
+        }
+
+        // 🎯 CTO FIX: Auto-Complete if Wallet covers 100% of the cost
+        // MOVED HERE: so it checks AFTER wallet discount is applied
+        if ((float) $order->get_total() <= 0.01) { // 0.01 tolerance
+            
+            // If it wasn't already wallet, mark it
+            if($order->get_payment_method() !== 'mhjoy_wallet') {
+                 $order->set_payment_method('mhjoy_wallet');
+            }
+            
+            $order->payment_complete(); // Tells core-logic to finalize the balance
+            $order->update_status('processing', 'Fully paid via Wallet'); // Force processing
+        }
+
+        $order->save();
+
+        $payment_url = null;
+        if ($data['payment_method'] === 'uddoktapay') {
+            $settings = get_option('woocommerce_uddoktapay_settings');
+            if (!empty($settings['api_key']) && !empty($settings['api_url'])) {
+                $payment_request = [
+                    'full_name' => $billing['first_name'] . ' ' . $billing['last_name'],
+                    'email' => $billing['email'],
+                    'amount' => $order->get_total(),
+                    'metadata' => ['order_id' => (string) $order->get_id()],
+                    'redirect_url' => 'https://mhjoygamershub.com/cart?status=success&order_id=' . $order->get_id() . '&token=' . $guest_token . '&email=' . urlencode($billing['email']),
+                    'return_type' => 'GET',
+                    'cancel_url' => 'https://mhjoygamershub.com/cart',
+                    'webhook_url' => site_url('/wp-json/uddoktapay/v1/webhook')
+                ];
+
+                $response = wp_remote_post(
+                    rtrim($settings['api_url'], '/') . '/checkout-v2',
+                    [
+                        'headers' => [
+                            'Content-Type' => 'application/json',
+                            'RT-UDDOKTAPAY-API-KEY' => $settings['api_key']
+                        ],
+                        'body' => json_encode($payment_request),
+                        'timeout' => 60
+                    ]
+                );
+
+                if (!is_wp_error($response)) {
+                    $body = json_decode(wp_remote_retrieve_body($response), true);
+                    if (isset($body['payment_url'])) {
+                        $payment_url = $body['payment_url'];
+                        $order->update_meta_data('_api_payment_url', $payment_url);
+                        $order->save();
+                    }
+                }
+            }
+        }
+
+        return new WP_REST_Response([
+            'id' => $order->get_id(),
+            'payment_url' => $payment_url,
+            'guest_token' => $guest_token,
+            'success' => true
+        ], 200);
+
+    } catch (Exception $e) {
+        return new WP_Error('order_failed', $e->getMessage(), ['status' => 500]);
+    }
+}
+
+/**
+ * API Endpoint: Track Order
+ */
+function mhjoy_handle_track_order($request)
+{
+    $params = $request->get_json_params();
+    $order_id = isset($params['order_id']) ? absint($params['order_id']) : 0;
+    $email = isset($params['email']) ? sanitize_email($params['email']) : '';
+    $token = isset($params['token']) ? sanitize_text_field($params['token']) : '';
+
+    if (!$order_id || !$email) {
+        return new WP_Error('missing_params', 'Order ID and email required', ['status' => 400]);
+    }
+
+    $order = wc_get_order($order_id);
+    if (!$order) {
+        return new WP_Error('not_found', 'Order not found', ['status' => 404]);
+    }
+
+    // Verify email matches
+    if (strtolower($order->get_billing_email()) !== strtolower($email)) {
+        return new WP_Error('not_found', 'Order not found', ['status' => 404]);
+    }
+
+    // Token management
+    $stored_token = $order->get_meta('_headless_guest_token');
+
+    if (!$stored_token) {
+        $stored_token = bin2hex(random_bytes(16));
+        $order->update_meta_data('_headless_guest_token', $stored_token);
+        $order->save();
+    }
+
+    // If token missing or invalid, send magic link
+    if (!$token || $token !== $stored_token) {
+        $link = 'https://mhjoygamershub.com/track-order?order_id=' . $order_id . '&email=' . urlencode($email) . '&token=' . $stored_token;
+
+        $subject = "Access your digital codes for Order #" . $order_id;
+        $message = "Hi,\n\nSomeone requested to view the license keys for Order #$order_id.\n\nTo access your vault, click this secure link:\n" . $link . "\n\nIf this wasn't you, ignore this email.\n\nThanks,\nMHJoyGamersHub Team";
+
+        $headers = [
+            'Content-Type: text/plain; charset=UTF-8',
+            'From: MHJoyGamersHub <admin@mhjoygamershub.com>'
+        ];
+
+        wp_mail($email, $subject, $message, $headers);
+
+        return new WP_REST_Response([
+            'status' => 'email_sent',
+            'message' => 'For security, a tracking link has been sent to your email.'
+        ], 200);
+    }
+
+    // Success - return order data
+    $data = mhjoy_process_orders_response([$order]);
+    return new WP_REST_Response($data[0], 200);
+}
+
+/**
+ * API Endpoint: My Orders
+ */
+function mhjoy_handle_my_orders($request)
+{
+    $params = $request->get_json_params();
+    $user_id = isset($params['user_id']) ? absint($params['user_id']) : 0;
+
+    if (!$user_id) {
+        return new WP_Error('no_user', 'User ID required', ['status' => 400]);
+    }
+
+    $orders = wc_get_orders([
+        'customer' => $user_id,
+        'limit' => 20,
+        'status' => ['completed', 'processing', 'on-hold', 'pending', 'cancelled'],
+        'orderby' => 'date',
+        'order' => 'DESC'
+    ]);
+
+    return new WP_REST_Response(mhjoy_process_orders_response($orders), 200);
+}
+
+/**
+ * API Endpoint: Verify Payment
+ */
+function mhjoy_handle_verify_payment($request)
+{
+    $params = $request->get_json_params();
+    $order_id = isset($params['order_id']) ? absint($params['order_id']) : 0;
+    $invoice_id = isset($params['invoice_id']) ? sanitize_text_field($params['invoice_id']) : '';
+
+    $order = wc_get_order($order_id);
+    if (!$order) {
+        return new WP_Error('not_found', 'Order not found', ['status' => 404]); 
+    }
+
+    // 1. Invoice ID Check (Security)
+    if (empty($invoice_id)) {
+        return new WP_Error('missing_params', 'Invoice ID required for verification', ['status' => 400]);
+    }
+
+    // 2. Already Paid?
+    if ($order->is_paid()) {
+        return new WP_REST_Response(['status' => 'verified', 'message' => 'Already paid'], 200);
+    }
+
+    // 3. API Verification with UddoktaPay
+    $settings = get_option('woocommerce_uddoktapay_settings');
+    $api_url = rtrim($settings['api_url'], '/');
+
+    // FIX: If user entered '.../api' in settings, remove it to avoid '.../api/api/...'
+    if (substr($api_url, -4) === '/api') {
+        $api_url = substr($api_url, 0, -4);
+    }
+    
+    // Log verification attempt
+    error_log("🔍 [Normal Order] Verifying Order #$order_id with Invoice: $invoice_id");
+
+    $response = wp_remote_post(
+        $api_url . '/api/verify-payment',
+        [
+            'headers' => [
+                'RT-UDDOKTAPAY-API-KEY' => $settings['api_key'],
+                'Content-Type' => 'application/json',
+                'Accept' => 'application/json'
+            ],
+            'body' => json_encode(['invoice_id' => $invoice_id]),
+            'timeout' => 20
+        ]
+    );
+
+    if (is_wp_error($response)) {
+        error_log("❌ [Normal Order] API Request Failed: " . $response->get_error_message());
+        return new WP_Error('api_error', 'Gateway connection failed', ['status' => 500]);
+    }
+
+    $body = wp_remote_retrieve_body($response);
+    $data = json_decode($body, true);
+    
+    // Log raw response for debugging
+    error_log("📥 [Normal Order] Gateway Response: " . $body);
+
+    if (json_last_error() !== JSON_ERROR_NONE) {
+        return new WP_Error('json_error', 'Invalid response from gateway', ['status' => 500]);
+    }
+
+    // 4. Validation
+    if (isset($data['status']) && $data['status'] === 'COMPLETED') {
+        
+        // CRITICAL: Amount Verification
+        $paid_amount = floatval($data['amount']);
+        $order_total = floatval($order->get_total());
+        
+        if (abs($paid_amount - $order_total) > 1.0) { // Allow tiny diff
+            error_log("🚨 [Normal Order] FRAUD ALERT: Amount mismatch! Order: $order_total, Paid: $paid_amount");
+            $order->update_status('failed', "Fraud check failed: Amount mismatch. Paid: $paid_amount");
+            return new WP_Error('fraud_check', 'Amount mismatch', ['status' => 400]);
+        }
+
+        // ✅ Success logic
+        $transaction_id = $data['transaction_id'] ?? $invoice_id;
+        $order->payment_complete($transaction_id);
+        $order->add_order_note("✅ Payment Verified via API. Invoice: $invoice_id");
+        $order->update_meta_data('_uddoktapay_invoice_id', $invoice_id); // Save it now
+        
+        // Note: We do NOT force 'completed' here. Standard behavior: 'processing' for physical/virtual.
+        $order->save();
+
+        return new WP_REST_Response(['status' => 'verified', 'success' => true], 200);
+    }
+
+    return new WP_Error('failed', 'Verification failed or pending', ['status' => 400]);
+}
+
+/**
+ * API Endpoint: Register Customer
+ */
+function mhjoy_handle_register($request)
+{
+    $data = $request->get_json_params();
+
+    $user_id = wc_create_new_customer(
+        $data['email'],
+        isset($data['username']) ? $data['username'] : '',
+        $data['password']
+    );
+
+    if (is_wp_error($user_id)) {
+        return $user_id;
+    }
+
+    if (!empty($data['first_name'])) {
+        update_user_meta($user_id, 'first_name', sanitize_text_field($data['first_name']));
+    }
+    if (!empty($data['last_name'])) {
+        update_user_meta($user_id, 'last_name', sanitize_text_field($data['last_name']));
+    }
+
+    return new WP_REST_Response([
+        'id' => $user_id,
+        'username' => $data['username'],
+        'email' => $data['email'],
+        'avatar_url' => get_avatar_url($user_id)
+    ], 200);
+}
+
+/**
+ * API Endpoint: Login
+ */
+function mhjoy_handle_login($request)
+{
+    $params = $request->get_json_params();
+    $user = get_user_by('email', $params['email']);
+
+    if ($user && wp_check_password($params['password'], $user->data->user_pass, $user->ID)) {
+        return new WP_REST_Response([
+            'id' => $user->ID,
+            'username' => $user->user_login,
+            'email' => $user->user_email,
+            'avatar_url' => get_avatar_url($user->ID)
+        ], 200);
+    }
+
+    return new WP_Error('invalid_credentials', 'Invalid email or password', ['status' => 401]);
+}
+
+/**
+ * API Endpoint: Get Profile
+ */
+function mhjoy_handle_get_profile($request)
+{
+    $params = $request->get_json_params();
+    $user = get_user_by('email', $params['email']);
+
+    if (!$user) {
+        return new WP_Error('not_found', 'User not found', ['status' => 404]);
+    }
+
+    return new WP_REST_Response([
+        'id' => $user->ID,
+        'username' => $user->user_login,
+        'email' => $user->user_email,
+        'first_name' => get_user_meta($user->ID, 'first_name', true),
+        'last_name' => get_user_meta($user->ID, 'last_name', true),
+        'avatar_url' => get_avatar_url($user->ID)
+    ], 200);
+}
+
+/**
+ * API Endpoint: Update Profile
+ */
+function mhjoy_handle_update_profile($request)
+{
+    $params = $request->get_json_params();
+    $user_id = isset($params['id']) ? absint($params['id']) : 0;
+
+    if (!$user_id) {
+        return new WP_Error('invalid_user', 'User ID required', ['status' => 400]);
+    }
+
+    if (!empty($params['first_name'])) {
+        update_user_meta($user_id, 'first_name', sanitize_text_field($params['first_name']));
+    }
+    if (!empty($params['last_name'])) {
+        update_user_meta($user_id, 'last_name', sanitize_text_field($params['last_name']));
+    }
+    if (!empty($params['password'])) {
+        wp_set_password($params['password'], $user_id);
+    }
+
+    return new WP_REST_Response(['status' => 'updated'], 200);
+}
+
+/**
+ * API Endpoint: Reset Password
+ */
+function mhjoy_handle_reset_password($request)
+{
+    // Implement password reset logic here
+    return new WP_REST_Response(['status' => 'sent'], 200);
+}
+
+/**
+ * API Endpoint: Contact Form
+ */
+function mhjoy_handle_contact($request)
+{
+    // Implement contact form logic here
+    return new WP_REST_Response(['status' => 'ok'], 200);
+}
+
+/**
+ * Auto-complete orders after payment
+ */
+add_action('woocommerce_payment_complete', function ($order_id) {
+    $order = wc_get_order($order_id);
+    // SKIP for Wallet Topups (they should stay Completed)
+    if ($order && $order->get_meta('_is_wallet_topup') !== 'yes') {
+        $order->update_status('processing');
+    }
+});
+/**
+ * ========================================
+ * HEADLESS FRONTEND: Product URL Override
+ * ========================================
+ * 
+ * Purpose: Force all WooCommerce product links to use React Frontend
+ * Affects: Facebook Catalog, Google Merchant, Email Receipts, Payment Gateways
+ * 
+ * @since 1.1.0
+ */
+
+// Override WooCommerce product permalink
+add_filter('woocommerce_product_get_permalink', 'mhjoy_headless_product_url', 10, 2);
+add_filter('post_type_link', 'mhjoy_headless_product_url_universal', 10, 2);
+
+function mhjoy_headless_product_url($url, $product)
+{
+    $frontend_domain = 'https://mhjoygamershub.com';
+    $slug = $product->get_slug();
+
+    // Build base URL
+    $new_url = $frontend_domain . '/product/' . $slug;
+
+    // Add UTM tracking for Facebook traffic
+    if (isset($_GET['fb_source']) || (isset($_SERVER['HTTP_REFERER']) && strpos($_SERVER['HTTP_REFERER'], 'facebook.com') !== false)) {
+        $new_url .= '?utm_source=facebook&utm_medium=catalog&utm_campaign=product_feed';
+    }
+
+    error_log("🔗 Product URL Override: {$url} → {$new_url}");
+
+    return $new_url;
+}
+
+function mhjoy_headless_product_url_universal($url, $post)
+{
+    // Only apply to WooCommerce products
+    if ($post->post_type !== 'product') {
+        return $url;
+    }
+
+    $frontend_domain = 'https://mhjoygamershub.com';
+    return $frontend_domain . '/product/' . $post->post_name;
+}
+
+/**
+ * Facebook Catalog: Product URL Override
+ * Ensures Facebook scrapes React URLs, not WordPress URLs
+ */
+add_filter('wc_facebook_product_catalog_feed_item_url', 'mhjoy_facebook_catalog_url', 10, 2);
+
+function mhjoy_facebook_catalog_url($url, $product)
+{
+    $frontend_domain = 'https://mhjoygamershub.com';
+    $slug = $product->get_slug();
+
+    // Add Facebook-specific UTM tracking
+    return $frontend_domain . '/product/' . $slug . '?utm_source=facebook&utm_medium=catalog&utm_campaign=dynamic_ad';
+}
+
+/**
+ * Email Receipts: Override order received URL to React frontend
+ */
+add_filter('woocommerce_get_checkout_order_received_url', 'mhjoy_headless_order_received_url', 10, 2);
+
+function mhjoy_headless_order_received_url($url, $order)
+{
+    $frontend_domain = 'https://mhjoygamershub.com';
+    $order_id = $order->get_id();
+    $order_key = $order->get_order_key();
+
+    // Return React order confirmation page
+    return $frontend_domain . '/order-received/' . $order_id . '?key=' . $order_key;
+}
+
+
+/**
+ * 🔐 ENDPOINT: Send OTP
+ * POST /wp-json/custom/v1/send-otp
+ */
+function mhjoy_send_otp_handler($request)
+{
+    $email = sanitize_email($request->get_param('email'));
+
+    // Validate email
+    if (!$email || !is_email($email)) {
+        return new WP_Error('invalid_email', 'Invalid email address', ['status' => 400]);
+    }
+
+    // Rate Limiting: Max 3 requests per hour
+    $rate_limit_key = 'otp_rate_limit_' . md5($email);
+    $rate_limit_count = get_transient($rate_limit_key);
+
+    if ($rate_limit_count >= 3) {
+        return new WP_Error(
+            'too_many_requests',
+            'Too many OTP requests. Please try again in 1 hour.',
+            ['status' => 429]
+        );
+    }
+
+    // Generate 6-digit OTP
+    $otp = str_pad(rand(0, 999999), 6, '0', STR_PAD_LEFT);
+
+    // Store OTP (expires in 10 minutes)
+    set_transient('otp_' . md5($email), $otp, 10 * MINUTE_IN_SECONDS);
+
+    // Update rate limit counter
+    if ($rate_limit_count === false) {
+        set_transient($rate_limit_key, 1, HOUR_IN_SECONDS);
+    } else {
+        set_transient($rate_limit_key, $rate_limit_count + 1, HOUR_IN_SECONDS);
+    }
+
+    // Send email
+    $subject = 'Your Verification Code - MHJoyGamersHub';
+    $message = sprintf(
+        "Hello,\n\n" .
+        "Your 6-digit verification code is: %s\n\n" .
+        "This code expires in 10 minutes.\n\n" .
+        "If you didn't request this code, please ignore this email.\n\n" .
+        "Best regards,\n" .
+        "MHJoyGamersHub Team",
+        $otp
+    );
+
+    $headers = ['Content-Type: text/plain; charset=UTF-8'];
+    $mail_sent = wp_mail($email, $subject, $message, $headers);
+
+    if (!$mail_sent) {
+        error_log("❌ Failed to send OTP to: $email");
+        return new WP_Error('email_failed', 'Failed to send email', ['status' => 500]);
+    }
+
+    error_log("✅ OTP sent to: $email");
+
+    return rest_ensure_response([
+        'success' => true,
+        'message' => 'OTP sent to your email',
+        'email' => $email
+    ]);
+}
+
+/**
+ * 🔐 ENDPOINT: Verify OTP
+ * POST /wp-json/custom/v1/verify-otp
+ */
+function mhjoy_verify_otp_handler($request)
+{
+    $email = sanitize_email($request->get_param('email'));
+    $user_code = sanitize_text_field($request->get_param('code'));
+
+    // Validate inputs
+    if (!$email || !is_email($email)) {
+        return new WP_Error('invalid_email', 'Invalid email address', ['status' => 400]);
+    }
+
+    if (empty($user_code)) {
+        return new WP_Error('invalid_code', 'Code is required', ['status' => 400]);
+    }
+
+    // Retrieve stored OTP
+    $stored_code = get_transient('otp_' . md5($email));
+
+    // Check if expired
+    if ($stored_code === false) {
+        error_log("❌ OTP expired for: $email");
+        return new WP_Error('otp_expired', 'Code expired. Please request a new one.', ['status' => 400]);
+    }
+
+    // Check if code matches
+    if ((string) $stored_code !== (string) $user_code) {
+        error_log("❌ Wrong OTP for: $email");
+        return new WP_Error('invalid_code', 'Invalid verification code', ['status' => 401]);
+    }
+
+    // Success! Delete code to prevent reuse
+    delete_transient('otp_' . md5($email));
+
+    error_log("✅ OTP verified for: $email");
+
+    return rest_ensure_response([
+        'success' => true,
+        'message' => 'Email verified successfully',
+        'email' => $email
+    ]);
+}
+/**
+ * VIP Status Check
+ */
+function mhjoy_handle_vip_status($request)
+{
+    global $wpdb;
+
+    $table_balance = $wpdb->prefix . 'mhjoy_wallet_balance';
+    $table_stats = $wpdb->prefix . 'mhjoy_user_statistics';
+    $user_email = sanitize_email($_GET['user_email'] ?? '');
+
+    if (empty($user_email)) {
+        return new WP_Error('missing_email', 'Email required', ['status' => 400]);
+    }
+
+    $user = $wpdb->get_row($wpdb->prepare(
+        "SELECT b.user_email, b.balance, b.streak, s.total_orders, s.total_spent
+         FROM $table_balance b
+         LEFT JOIN $table_stats s ON b.user_email = s.user_email
+         WHERE b.user_email = %s",
+        $user_email
+    ));
+
+    if (!$user) {
+        return new WP_REST_Response(['user_email' => $user_email, 'vip_tier' => 'regular', 'is_vip' => false, 'balance' => 0, 'total_spent' => 0], 200);
+    }
+
+    $total_spent = floatval($user->total_spent ?? 0);
+    $vip_tier = $total_spent >= 5000 ? 'platinum' : ($total_spent >= 2000 ? 'gold' : ($total_spent >= 1000 ? 'silver' : 'regular'));
+
+    return new WP_REST_Response([
+        'user_email' => $user_email,
+        'vip_tier' => $vip_tier,
+        'is_vip' => $vip_tier !== 'regular',
+        'balance' => floatval($user->balance ?? 0),
+        'total_spent' => $total_spent,
+        'total_orders' => intval($user->total_orders ?? 0),
+        'streak' => intval($user->streak ?? 0)
+    ], 200);
+}
+/**
+ * API Endpoint: Initialize Wallet Top-up
+ * Added here to ensure zero-conflict with gateway logic.
+ */
+/**
+ * 1. INITIALIZE TOPUP (SIMPLE PATH)
+ */
+function mhjoy_handle_wallet_topup_init($request)
+{
+    $data = $request->get_json_params();
+    $email = sanitize_email($data['user_email']);
+    $amount = floatval($data['amount']);
+
+    if ($amount < 10) {
+        return new WP_Error('min_topup', 'Minimum ৳10', ['status' => 400]);
+    }
+
+    try {
+        // 1. LOOKUP USER (To avoid "Guest" status)
+        $user = get_user_by('email', $email);
+
+        // 2. CREATE ORDER
+        $order = wc_create_order();
+
+        // 3. ADD VISIBLE LINE ITEM (Fixes the "Empty Items" issue)
+        $item_fee = new WC_Order_Item_Fee();
+        $item_fee->set_name('MHJoyGamersHub Wallet Top-up');
+        $item_fee->set_amount($amount);
+        $item_fee->set_total($amount);
+        $item_fee->set_tax_status('none'); // No tax on wallet funds
+        $order->add_item($item_fee);
+
+        // 4. LINK CUSTOMER & BILLING
+        if ($user) {
+            $order->set_customer_id($user->ID);
+            // Pull real names if available
+            $fname = get_user_meta($user->ID, 'first_name', true);
+            $lname = get_user_meta($user->ID, 'last_name', true);
+            $order->set_billing_first_name($fname ?: 'Wallet');
+            $order->set_billing_last_name($lname ?: 'User');
+        }
+
+        $order->set_billing_email($email);
+        $order->set_payment_method('uddoktapay');
+
+        // 5. SECURITY & TRACKING
+        $guest_token = bin2hex(random_bytes(16));
+        $order->update_meta_data('_headless_guest_token', $guest_token);
+        $order->update_meta_data('_is_wallet_topup', 'yes');
+
+        // 6. FINALIZE (This calculates subtotals correctly)
+        $order->calculate_totals();
+        $order->save();
+
+        // 7. UDDOKTAPAY HANDSHAKE
+        $settings = get_option('woocommerce_uddoktapay_settings');
+        $payment_request = [
+            'full_name' => ($user ? $fname . ' ' . $lname : 'Wallet User'),
+            'email' => $email,
+            'amount' => $order->get_total(),
+            'metadata' => ['order_id' => (string) $order->get_id()],
+            'redirect_url' => 'https://mhjoygamershub.com/wallet?status=success&order_id=' . $order->get_id() . '&token=' . $guest_token . '&email=' . urlencode($email),
+            'return_type' => 'GET',
+            'cancel_url' => 'https://mhjoygamershub.com/wallet',
+            'webhook_url' => site_url('/wp-json/uddoktapay/v1/webhook')
+        ];
+
+        $response = wp_remote_post(rtrim($settings['api_url'], '/') . '/checkout-v2', [
+            'headers' => ['Content-Type' => 'application/json', 'RT-UDDOKTAPAY-API-KEY' => $settings['api_key']],
+            'body' => json_encode($payment_request),
+            'timeout' => 30
+        ]);
+
+        $body = json_decode(wp_remote_retrieve_body($response), true);
+
+        if (isset($body['payment_url'])) {
+            return new WP_REST_Response([
+                'success' => true,
+                'payment_url' => $body['payment_url'],
+                'order_id' => $order->get_id()
+            ], 200);
+        }
+
+        return new WP_Error('gateway_error', 'Gateway failed', ['status' => 400]);
+
+    } catch (Exception $e) {
+        return new WP_Error('error', $e->getMessage(), ['status' => 500]);
+    }
+}
+
+/**
+ * 2. VERIFY TOPUP (SECURE VERSION)
+ * Uses UddoktaPay Verify Payment API
+ */
+function mhjoy_handle_verify_topup($request)
+{
+    $params = $request->get_json_params();
+    $order_id = absint($params['order_id']);
+    $token = sanitize_text_field($params['token']);
+    $invoice_id = sanitize_text_field($params['invoice_id'] ?? '');
+
+    $order = wc_get_order($order_id);
+
+    // 1. Auth & Token Check
+    if (!$order || $order->get_meta('_headless_guest_token') !== $token) {
+        return new WP_Error('invalid', 'Invalid credentials', ['status' => 403]);
+    }
+
+    // 2. Already paid?
+    if ($order->is_paid()) {
+        return new WP_REST_Response([
+            'success' => true, 
+            'paid' => true, 
+            'message' => 'Already verified'
+        ], 200);
+    }
+
+    // 3. Invoice ID Check
+    if (empty($invoice_id)) {
+        return new WP_Error('missing_params', 'Invoice ID required for verification', ['status' => 400]);
+    }
+
+    // 4. API Verification with UddoktaPay
+    $settings = get_option('woocommerce_uddoktapay_settings');
+    $api_url = rtrim($settings['api_url'], '/');
+
+    // FIX: If user entered '.../api' in settings, remove it to avoid '.../api/api/...'
+    if (substr($api_url, -4) === '/api') {
+        $api_url = substr($api_url, 0, -4);
+    }
+    
+    // Log verification attempt
+    error_log("🔍 [Wallet] Verifying Order #$order_id with Invoice: $invoice_id");
+
+    $response = wp_remote_post(
+        $api_url . '/api/verify-payment',
+        [
+            'headers' => [
+                'RT-UDDOKTAPAY-API-KEY' => $settings['api_key'],
+                'Content-Type' => 'application/json',
+                'Accept' => 'application/json'
+            ],
+            'body' => json_encode(['invoice_id' => $invoice_id]),
+            'timeout' => 20
+        ]
+    );
+
+    if (is_wp_error($response)) {
+        error_log("❌ [Wallet] API Request Failed: " . $response->get_error_message());
+        return new WP_Error('api_error', 'Gateway connection failed', ['status' => 500]);
+    }
+
+    $body = wp_remote_retrieve_body($response);
+    $data = json_decode($body, true);
+    
+    // Log raw response for debugging
+    error_log("📥 [Wallet] Gateway Response: " . $body);
+
+    if (json_last_error() !== JSON_ERROR_NONE) {
+        return new WP_Error('json_error', 'Invalid response from gateway', ['status' => 500]);
+    }
+
+    // 5. Validation
+    if (isset($data['status']) && $data['status'] === 'COMPLETED') {
+        
+        // CRITICAL: Amount Verification
+        $paid_amount = floatval($data['amount']);
+        $order_total = floatval($order->get_total());
+        
+        if (abs($paid_amount - $order_total) > 1.0) { // Allow tiny diff
+            error_log("🚨 [Wallet] FRAUD ALERT: Amount mismatch! Order: $order_total, Paid: $paid_amount");
+            $order->update_status('failed', "Fraud check failed: Amount mismatch. Paid: $paid_amount");
+            return new WP_Error('fraud_check', 'Amount mismatch', ['status' => 400]);
+        }
+
+        // ✅ Success logic
+        $transaction_id = $data['transaction_id'] ?? $invoice_id;
+        $order->payment_complete($transaction_id);
+        $order->add_order_note("✅ Payment Verified via API. Invoice: $invoice_id");
+        $order->update_meta_data('_uddoktapay_invoice_id', $invoice_id); // Save it now
+        $order->save();
+
+        return new WP_REST_Response([
+            'success' => true,
+            'paid' => true,
+            'message' => 'Payment verified successfully'
+        ], 200);
+    }
+
+    return new WP_REST_Response([
+        'success' => false,
+        'paid' => false,
+        'status' => $data['status'] ?? 'UNKNOWN',
+        'message' => 'Payment not completed or failed'
+    ], 200);
+}

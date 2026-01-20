@@ -1,0 +1,339 @@
+<?php
+/**
+ * Plugin Name: MHJoy Wallet System v4.5 (Enterprise Edition)
+ * Description: The complete ecosystem. Includes Spins, Tiers, Tasks, Leaderboards, and React API Bridge.
+ * Version: 4.5.0
+ * Author: MHJoyGamersHub
+ * Requires at least: 5.8
+ * Requires PHP: 7.4
+ * License: GPL2
+ */
+
+if (!defined('ABSPATH')) {
+    exit;
+}
+
+// Define Constants
+define('MHJOY_WALLET_VERSION', '4.5.0');
+define('MHJOY_WALLET_PATH', plugin_dir_path(__FILE__));
+define('MHJOY_WALLET_URL', plugin_dir_url(__FILE__));
+
+// ==================== 1. MODULAR LOADING ====================
+// We will create these files in the next steps.
+// This architecture prevents the "file too large" error.
+
+// 1. Admin Dashboard & UI
+require_once MHJOY_WALLET_PATH . 'includes/admin-dashboard.php';
+
+// 2. Core Logic (Spins, Math, Tiers)
+require_once MHJOY_WALLET_PATH . 'includes/core-logic.php';
+
+// 3. API Endpoints (Headless React Bridge)
+require_once MHJOY_WALLET_PATH . 'includes/api-endpoints.php';
+
+// Add this line with the others:
+require_once MHJOY_WALLET_PATH . 'includes/financial-ledger.php';
+
+require_once MHJOY_WALLET_PATH . 'includes/notification-system.php';
+
+// ==================== 2. ACTIVATION & DATABASE ====================
+register_activation_hook(__FILE__, 'mhjoy_wallet_v45_activate');
+
+function mhjoy_wallet_v45_activate()
+{
+    mhjoy_create_v45_tables();
+
+    // Schedule Daily Maintenance (Midnight BD Time)
+    if (!wp_next_scheduled('mhjoy_daily_maintenance')) {
+        wp_schedule_event(strtotime('tomorrow midnight'), 'daily', 'mhjoy_daily_maintenance');
+    }
+
+    // Schedule Monthly Leaderboard Reset
+    if (!wp_next_scheduled('mhjoy_monthly_maintenance')) {
+        wp_schedule_event(strtotime('first day of next month'), 'monthly', 'mhjoy_monthly_maintenance');
+    }
+
+    error_log('✅ MHJoy Wallet v4.5 Enterprise Activated');
+}
+
+// Deactivation (Cleanup schedules, keep data)
+register_deactivation_hook(__FILE__, function () {
+    wp_clear_scheduled_hook('mhjoy_daily_maintenance');
+    wp_clear_scheduled_hook('mhjoy_monthly_maintenance');
+});
+
+// ==================== 3. DATABASE SCHEMA (THE FULL 9 TABLES) ====================
+function mhjoy_create_v45_tables()
+{
+    global $wpdb;
+    $charset_collate = $wpdb->get_charset_collate();
+
+    require_once(ABSPATH . 'wp-admin/includes/upgrade.php');
+
+    // --- Table 1: Wallet Balance (The Bank) ---
+    $table_balance = $wpdb->prefix . 'mhjoy_wallet_balance';
+    $sql1 = "CREATE TABLE IF NOT EXISTS $table_balance (
+        id BIGINT(20) UNSIGNED NOT NULL AUTO_INCREMENT,
+        user_email VARCHAR(255) NOT NULL,
+        balance DECIMAL(10,2) NOT NULL DEFAULT 0.00,
+        streak INT(11) DEFAULT 0,
+        last_daily_claim DATETIME NULL,
+        
+        -- v4.5 New Features
+        spin_claimed_today INT(1) DEFAULT 0,
+        premium_spins_balance INT(11) DEFAULT 0,
+        last_spin_date DATETIME NULL,
+        total_spins INT(11) DEFAULT 0,
+        loyalty_tier VARCHAR(20) DEFAULT 'bronze',
+        tier_benefits TEXT NULL,
+        referral_code VARCHAR(50) UNIQUE NULL,
+        referred_by VARCHAR(255) NULL,
+        commission_earned DECIMAL(10,2) DEFAULT 0.00,
+        
+        -- Security
+        fraud_flag ENUM('clean', 'suspicious', 'blocked') DEFAULT 'clean',
+        fraud_reason VARCHAR(255) NULL,
+        last_updated DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        
+        PRIMARY KEY (id),
+        UNIQUE KEY user_email (user_email),
+        KEY balance_idx (balance),
+        KEY loyalty_tier (loyalty_tier)
+    ) $charset_collate;";
+    dbDelta($sql1);
+
+    // --- Table 2: Gift Codes (Inventory) ---
+    $table_codes = $wpdb->prefix . 'mhjoy_gift_codes';
+    $sql2 = "CREATE TABLE IF NOT EXISTS $table_codes (
+        id BIGINT(20) UNSIGNED NOT NULL AUTO_INCREMENT,
+        code VARCHAR(50) NOT NULL,
+        amount DECIMAL(10,2) NOT NULL,
+        status ENUM('active', 'redeemed') DEFAULT 'active',
+        redeemed_by VARCHAR(255) NULL,
+        redeemed_at DATETIME NULL,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (id),
+        UNIQUE KEY code (code),
+        KEY status (status)
+    ) $charset_collate;";
+    dbDelta($sql2);
+
+    // --- Table 3: Redemptions (Security Audit) ---
+    $table_redemptions = $wpdb->prefix . 'mhjoy_gift_code_redemptions';
+    $sql3 = "CREATE TABLE IF NOT EXISTS $table_redemptions (
+        id BIGINT(20) UNSIGNED NOT NULL AUTO_INCREMENT,
+        code VARCHAR(50) NOT NULL,
+        code_prefix VARCHAR(20) NOT NULL,
+        user_email VARCHAR(255) NOT NULL,
+        device_fingerprint VARCHAR(64) NULL,
+        ip_address VARCHAR(45) NULL,
+        user_agent TEXT NULL,
+        amount DECIMAL(10,2) NOT NULL,
+        redeemed_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (id),
+        KEY code_prefix_email (code_prefix, user_email),
+        KEY device_fingerprint (device_fingerprint)
+    ) $charset_collate;";
+    dbDelta($sql3);
+
+    // --- Table 4: User Stats (Analytics) ---
+    $table_stats = $wpdb->prefix . 'mhjoy_user_statistics';
+    $sql4 = "CREATE TABLE IF NOT EXISTS $table_stats (
+        id BIGINT(20) UNSIGNED NOT NULL AUTO_INCREMENT,
+        user_email VARCHAR(255) NOT NULL,
+        total_orders INT(11) DEFAULT 0,
+        total_spent DECIMAL(10,2) DEFAULT 0.00,
+        device_fingerprints TEXT NULL,
+        ip_addresses TEXT NULL,
+        user_agents TEXT NULL,
+        last_order_date DATETIME NULL,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (id),
+        UNIQUE KEY user_email (user_email)
+    ) $charset_collate;";
+    dbDelta($sql4);
+
+    // --- Table 5: Spin History (New v4) ---
+    $table_spins = $wpdb->prefix . 'mhjoy_spin_history';
+    $sql5 = "CREATE TABLE IF NOT EXISTS $table_spins (
+        id BIGINT(20) UNSIGNED NOT NULL AUTO_INCREMENT,
+        user_email VARCHAR(255) NOT NULL,
+        spin_date DATE NOT NULL,
+        reward_amount DECIMAL(10,2) NOT NULL,
+        is_premium INT(1) DEFAULT 0,
+        spin_time TIME NOT NULL,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (id),
+        KEY user_date (user_email, spin_date)
+    ) $charset_collate;";
+    dbDelta($sql5);
+
+    // --- Table 6: Daily Tasks (New v4) ---
+    $table_tasks = $wpdb->prefix . 'mhjoy_daily_tasks';
+    $sql6 = "CREATE TABLE IF NOT EXISTS $table_tasks (
+        id BIGINT(20) UNSIGNED NOT NULL AUTO_INCREMENT,
+        user_email VARCHAR(255) NOT NULL,
+        task_type VARCHAR(50) NOT NULL,
+        task_date DATE NOT NULL,
+        completed INT(1) DEFAULT 0,
+        reward_amount DECIMAL(10,2) NOT NULL,
+        completed_at DATETIME NULL,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (id),
+        UNIQUE KEY user_task_date (user_email, task_type, task_date)
+    ) $charset_collate;";
+    dbDelta($sql6);
+
+    // --- Table 7: Referral System (New v4) ---
+    $table_ref = $wpdb->prefix . 'mhjoy_referral_system';
+    $sql7 = "CREATE TABLE IF NOT EXISTS $table_ref (
+        id BIGINT(20) UNSIGNED NOT NULL AUTO_INCREMENT,
+        referrer_email VARCHAR(255) NOT NULL,
+        referee_email VARCHAR(255) NOT NULL,
+        referral_code VARCHAR(50) NOT NULL,
+        status ENUM('pending', 'completed', 'cancelled') DEFAULT 'pending',
+        commission_amount DECIMAL(10,2) DEFAULT 0.00,
+        completed_at DATETIME NULL,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (id),
+        KEY referrer_email (referrer_email),
+        KEY referee_email (referee_email)
+    ) $charset_collate;";
+    dbDelta($sql7);
+
+    // --- Table 8: Leaderboard (New v4) ---
+    $table_lead = $wpdb->prefix . 'mhjoy_leaderboard_monthly';
+    $sql8 = "CREATE TABLE IF NOT EXISTS $table_lead (
+        id BIGINT(20) UNSIGNED NOT NULL AUTO_INCREMENT,
+        user_email VARCHAR(255) NOT NULL,
+        month DATE NOT NULL,
+        rank INT(11) NOT NULL,
+        total_earned DECIMAL(10,2) NOT NULL,
+        total_spent DECIMAL(10,2) NOT NULL,
+        total_referrals INT(11) DEFAULT 0,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (id),
+        UNIQUE KEY user_month (user_email, month)
+    ) $charset_collate;";
+    dbDelta($sql8);
+
+    // --- Table 9: Referral Transactions (Legacy Support) ---
+    $table_ref_tx = $wpdb->prefix . 'mhjoy_referral_transactions';
+    $sql9 = "CREATE TABLE IF NOT EXISTS $table_ref_tx (
+        id BIGINT(20) UNSIGNED NOT NULL AUTO_INCREMENT,
+        referrer_email VARCHAR(255) NOT NULL,
+        new_user_email VARCHAR(255) NOT NULL,
+        amount DECIMAL(10,2) DEFAULT 50.00,
+        transaction_type VARCHAR(50) DEFAULT 'referral_bonus',
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (id),
+        KEY referrer_email (referrer_email)
+    ) $charset_collate;";
+    dbDelta($sql9);
+}
+
+// ==================== 4. SYSTEM MAINTENANCE ====================
+// Runs daily to reset limits
+add_action('mhjoy_daily_maintenance', function () {
+    global $wpdb;
+
+    // 1. Reset Daily Spins
+    $table_balance = $wpdb->prefix . 'mhjoy_wallet_balance';
+    $wpdb->query("UPDATE $table_balance SET spin_claimed_today = 0");
+
+    // 2. Archive Old Tasks (Optional cleanup)
+    // 3. Update Streaks (Handled in Core Logic on login)
+
+    error_log('✅ MHJoy Daily Maintenance Run');
+});
+
+// Runs monthly to reset leaderboard
+add_action('mhjoy_monthly_maintenance', function () {
+    // We will archive current leaderboard to a history table if needed
+    // For now, we rely on the date column
+    error_log('✅ MHJoy Monthly Maintenance Run');
+});
+
+// ==================== ⚡ ONE-TIME HISTORY SYNC ⚡ ====================
+// This reads all WooCommerce orders and calculates 'Total Spent' for the Wallet Leaderboard
+add_action('admin_init', 'mhjoy_sync_woo_history');
+
+function mhjoy_sync_woo_history()
+{
+    if (!isset($_GET['mhjoy_sync_stats']))
+        return;
+
+    global $wpdb;
+    $t_stats = $wpdb->prefix . 'mhjoy_user_statistics';
+
+    // 1. CLEAR OLD DATA
+    $wpdb->query("TRUNCATE TABLE $t_stats");
+
+    // 2. PRIMARY SYNC: Use official WooCommerce Analytics tables
+    // Changed 'gross_total' to 'total_sales' which is the standard column
+    $results = $wpdb->get_results("
+        SELECT 
+            c.email, 
+            SUM(s.total_sales) as total_spent, 
+            COUNT(s.order_id) as total_orders,
+            MAX(s.date_created) as last_order_date
+        FROM {$wpdb->prefix}wc_customer_lookup c
+        JOIN {$wpdb->prefix}wc_order_stats s ON c.customer_id = s.customer_id
+        WHERE s.status IN ('wc-completed', 'wc-processing')
+        AND c.email IS NOT NULL AND c.email != ''
+        GROUP BY c.email
+    ");
+
+    // 3. FALLBACK SYNC: If the above failed or returned nothing, pull from raw Order Meta
+    if (empty($results)) {
+        $results = $wpdb->get_results("
+            SELECT 
+                m.meta_value as email, 
+                SUM(p.meta_value) as total_spent, 
+                COUNT(o.ID) as total_orders,
+                MAX(o.post_date) as last_order_date
+            FROM {$wpdb->prefix}posts o
+            JOIN {$wpdb->prefix}postmeta m ON o.ID = m.post_id AND m.meta_key = '_billing_email'
+            JOIN {$wpdb->prefix}postmeta p ON o.ID = p.post_id AND p.meta_key = '_order_total'
+            WHERE o.post_type = 'shop_order' 
+            AND o.post_status IN ('wc-completed', 'wc-processing')
+            GROUP BY m.meta_value
+        ");
+    }
+
+    // 4. PROCESS AND INSERT
+    foreach ($results as $r) {
+        $email = sanitize_email($r->email);
+        if (empty($email))
+            continue;
+
+        // Pull the IP from the most recent order for this email
+        $last_ip = $wpdb->get_var($wpdb->prepare("
+            SELECT m.meta_value 
+            FROM {$wpdb->prefix}postmeta m
+            JOIN {$wpdb->prefix}postmeta e ON m.post_id = e.post_id
+            WHERE e.meta_key = '_billing_email' AND e.meta_value = %s
+            AND m.meta_key = '_customer_ip_address'
+            ORDER BY m.post_id DESC LIMIT 1
+        ", $email));
+
+        $wpdb->insert($t_stats, [
+            'user_email' => $email,
+            'total_spent' => floatval($r->total_spent),
+            'total_orders' => intval($r->total_orders),
+            'last_order_date' => $r->last_order_date,
+            'ip_addresses' => $last_ip ?: '—',
+            'device_fingerprints' => '',
+            'user_agents' => 'Manual Repair Sync'
+        ]);
+    }
+
+    // 5. SUCCESS PAGE
+    echo '<div style="font-family:sans-serif; padding:50px; text-align:center;">';
+    echo '<h1 style="color:#10b981;">✅ Data Repaired & Synced!</h1>';
+    echo '<p>All duplicate users merged. ৳ Amounts and Order counts updated.</p>';
+    echo '<a href="' . admin_url('admin.php?page=mhjoy-wallet&tab=analytics') . '" style="display:inline-block; padding:10px 20px; background:#0ea5e9; color:white; text-decoration:none; border-radius:5px;">Go to Analytics</a>';
+    echo '</div>';
+    die();
+}
+?>
