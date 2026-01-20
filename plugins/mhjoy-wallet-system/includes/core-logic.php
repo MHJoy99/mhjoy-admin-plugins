@@ -47,10 +47,13 @@ function mhjoy_process_spin_logic($user_email, $is_premium = false)
             $wpdb->query('ROLLBACK');
             return new WP_Error('funds', 'Need ৳10', ['status' => 402]);
         }
+        // 🛡️ ADMIN BYPASS: Allow unlimited spins for test/admin accounts
+        $test_emails = ['mhjoypersonal@gmail.com', 'admin@mhjoygamershub.com'];
         $premium_today = $wpdb->get_var($wpdb->prepare("SELECT COUNT(*) FROM $t_spins WHERE user_email = %s AND spin_date = CURDATE() AND is_premium = 1", $user_email));
-        if ($premium_today >= 10) {
+        
+        if ($premium_today >= 10 && !in_array($user_email, $test_emails)) {
             $wpdb->query('ROLLBACK');
-            return new WP_Error('limit', 'Max 10 premium spins per day', ['status' => 429]);
+            return new WP_Error('limit', 'Max 10 premium spins per day reached! Come back tomorrow!', ['status' => 429]);
         }
     }
 
