@@ -1,0 +1,8 @@
+# Ignore all third-party plugins (only track custom mhjoy plugins in plugins/ directory)
+/*
+!/plugins/
+!/.gitignore
+!/README.md
+
+# Ignore common WordPress files
+index.php
