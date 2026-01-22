@@ -139,13 +139,38 @@ function mhjoy_wallet_redeem_api($request)
             return new WP_Error('invalid_code', 'Invalid or Redeemed Code', array('status' => 404));
         }
 
-        // Update/Create Balance
+        // --- NEW: HANDLE TOKEN VS CASH ---
+        $is_token = isset($gift->type) && $gift->type === 'token';
         $existing = $wpdb->get_row($wpdb->prepare("SELECT * FROM $table_balance WHERE user_email = %s", $email));
-        $new_balance = $existing ? round(floatval($existing->balance) + floatval($gift->amount), 2) : round(floatval($gift->amount), 2);
-        if ($existing) {
-            $wpdb->update($table_balance, ['balance' => $new_balance], ['user_email' => $email]);
+        
+        if ($is_token) {
+            // Token Logic
+            $new_tokens = ($existing ? ($existing->vault_token_balance ?? 0) : 0) + intval($gift->amount);
+            if ($existing) {
+                $wpdb->update($table_balance, ['vault_token_balance' => $new_tokens], ['user_email' => $email]);
+            } else {
+                $wpdb->insert($table_balance, ['user_email' => $email, 'balance' => 0, 'vault_token_balance' => $new_tokens]);
+            }
+            // Log as 'spin_reward' (or 'token_gift') so it shows in Vault Log. 
+            // Using 'admin_adjustment' type source logic for vault log compatibility:
+            // Vault Log Query: source IN ('vault_redemption', 'spin_reward', 'admin_adjustment', 'token_gift')
+            mhjoy_log_transaction($email, 'credit', 0, 'token_gift', "Redeemed Code for " . intval($gift->amount) . " Tokens", $existing ? $existing->balance : 0);
+            
+            $msg = intval($gift->amount) . ' 💎 Tokens added!';
+            $new_bal_display = $new_tokens;
         } else {
-            $wpdb->insert($table_balance, ['user_email' => $email, 'balance' => $new_balance]);
+            // Cash Logic (Standard)
+            $new_balance = $existing ? round(floatval($existing->balance) + floatval($gift->amount), 2) : round(floatval($gift->amount), 2);
+            if ($existing) {
+                $wpdb->update($table_balance, ['balance' => $new_balance], ['user_email' => $email]);
+            } else {
+                $wpdb->insert($table_balance, ['user_email' => $email, 'balance' => $new_balance]);
+            }
+            
+            mhjoy_log_transaction($email, 'credit', $gift->amount, 'redeem', 'Code: ' . $code, $new_balance);
+            
+            $msg = '৳' . number_format($gift->amount, 2) . ' added!';
+            $new_bal_display = floatval($new_balance);
         }
 
         // Log Redemption
@@ -158,12 +183,6 @@ function mhjoy_wallet_redeem_api($request)
             'amount' => $gift->amount
         ]);
 
-        // PASTE THE CODE BELOW THIS LINE
-        // LOGGING
-        $current_bal = $existing ? $existing->balance + $gift->amount : $gift->amount;
-        mhjoy_log_transaction($email, 'credit', $gift->amount, 'redeem', 'Code: ' . $code, $current_bal);
-        // END PASTE
-
         // Mark Used
         $wpdb->update(
             $table_codes,
@@ -171,7 +190,7 @@ function mhjoy_wallet_redeem_api($request)
             ['id' => $gift->id]
         );
 
-        // Trigger Fraud Analysis (If core logic exists)
+        // Trigger Fraud Analysis
         if (function_exists('mhjoy_analyze_fraud_risk')) {
             mhjoy_analyze_fraud_risk($email, $device_fp, $ip_address);
         }
@@ -180,8 +199,9 @@ function mhjoy_wallet_redeem_api($request)
 
         return new WP_REST_Response(array(
             'success' => true,
-            'message' => '৳' . number_format($gift->amount, 2) . ' added!',
-            'new_balance' => floatval($new_balance)
+            'message' => $msg,
+            'new_balance' => $new_bal_display,
+            'is_token' => $is_token
         ), 200);
     } catch (Exception $e) {
         $wpdb->query('ROLLBACK');
@@ -240,31 +260,33 @@ function mhjoy_wallet_daily_reward($request)
 
     $streak = $user ? $user->streak + 1 : 1;
 
-    // Reward Logic (Freemium)
+    // Reward Logic (Freemium) - SWITCHED TO VAULT TOKENS
     if ($is_vip) {
-        // 🎯 COST OPTIMIZATION: Reduced from ৳25/weekly + rand(2,5)/daily
-        // New: ৳10/weekly + rand(1,3)/daily = 60% cost reduction
-        $reward = ($streak % 7 == 0) ? 10 : rand(1, 3);
-        $msg = ($streak % 7 == 0) ? "🎉 WEEKLY JACKPOT! ৳$reward" : "Daily reward: ৳$reward";
+        $reward = ($streak % 7 == 0) ? 50 : rand(5, 15);
+        $msg = ($streak % 7 == 0) ? "🎉 WEEKLY JACKPOT! $reward 💎" : "Daily reward: $reward 💎";
     } else {
-        $reward = ($streak % 7 == 0) ? 5 : 1;
-        $msg = "Free Tier: ৳$reward. Buy something to unlock 5x rewards!";
+        $reward = ($streak % 7 == 0) ? 10 : 2;
+        $msg = "Free Tier: $reward 💎. Buy something to unlock 5x rewards!";
     }
 
     if ($user) {
-        $wpdb->update($t_bal, ['balance' => round($user->balance + $reward, 2), 'streak' => $streak, 'last_daily_claim' => current_time('mysql')], ['user_email' => $email]);
+        // Update Vault Tokens
+        $new_tokens = ($user->vault_token_balance ?? 0) + $reward;
+        $wpdb->update($t_bal, ['vault_token_balance' => $new_tokens, 'streak' => $streak, 'last_daily_claim' => current_time('mysql')], ['user_email' => $email]);
     } else {
-        $wpdb->insert($t_bal, ['user_email' => $email, 'balance' => $reward, 'streak' => 1, 'last_daily_claim' => current_time('mysql')]);
+        $wpdb->insert($t_bal, ['user_email' => $email, 'balance' => 0, 'vault_token_balance' => $reward, 'streak' => 1, 'last_daily_claim' => current_time('mysql')]);
     }
 
-    mhjoy_log_transaction($email, 'credit', $reward, 'daily', $msg, ($user ? $user->balance : 0) + $reward);
+    // Log as 'daily_reward' for Vault Log
+    // Amount is 0 (cash), but we put tokens in description for visual log
+    mhjoy_log_transaction($email, 'credit', 0, 'daily_reward', "Daily Reward: $reward Vault Tokens", ($user ? $user->balance : 0));
     $wpdb->query('COMMIT');
 
     return [
         'success' => true,
-        'amount' => $reward,
+        'amount' => $reward, // Frontend can interpret this as tokens if we update frontend
         'streak' => $streak,
-        'message' => $msg,
+        'message' => $msg, // Message now has 💎
         'is_vip' => $is_vip
     ];
 }

@@ -104,15 +104,12 @@ function mhjoy_wallet_render_dashboard()
                 case 'spins':
                     mhjoy_render_spins_tab();
                     break;
-                // ADD THIS CASE BELOW
                 case 'history':
                     mhjoy_render_history_tab();
                     break;
-                // --- ADD THIS CASE BELOW ---
                 case 'partners':
                     mhjoy_render_partners_tab();
                     break;
-                // END ADDITION 
                 case 'analytics':
                     mhjoy_render_analytics_tab();
                     break;
@@ -798,219 +795,26 @@ function mhjoy_render_analytics_tab()
                     foreach ($data as $row):
                         $ips = array_filter(explode(',', $row->ip_addresses));
                         $last_ip = end($ips) ?: '—';
-                        $ip_count = count($ips);
                         ?>
                         <tr>
                             <td><strong><?php echo esc_html($row->user_email); ?></strong></td>
-                            <td style="color:#10b981; font-weight:bold;">৳<?php echo number_format($row->total_spent, 2); ?></td>
-                            <td><?php echo $row->total_orders; ?> buys</td>
-                            <td><small><?php echo $row->last_order_date ?: '—'; ?></small></td>
-                            <td>
-                                <code><?php echo esc_html($last_ip); ?></code>
-                                <?php if ($ip_count > 1): ?>
-                                    <span
-                                        style="background:#eee; padding:2px 5px; border-radius:10px; font-size:9px;">+<?php echo $ip_count - 1; ?>
-                                        more</span>
-                                <?php endif; ?>
+                            <td style="color:green; font-weight:bold;">৳<?php echo number_format($row->total_spent, 2); ?></td>
+                            <td><?php echo $row->total_orders; ?></td>
+                            <td><?php echo date('M d, Y', strtotime($row->last_order_date)); ?></td>
+                            <td><code
+                                    style="font-size:10px; background:#eee; padding:2px;"><?php echo count($ips) . ' IPs (Last: ' . $last_ip . ')'; ?></code>
                             </td>
-                            <td><span
-                                    class="mhjoy-badge <?php echo $row->loyalty_tier; ?>"><?php echo strtoupper($row->loyalty_tier); ?></span>
-                            </td>
+                            <td><span class="mhjoy-badge badge-<?php echo $row->loyalty_tier; ?>"><?php echo strtoupper($row->loyalty_tier); ?></span></td>
                         </tr>
-                    <?php endforeach; endif; ?>
+                    <?php endforeach;
+                endif; ?>
             </tbody>
         </table>
-
-        <div style="margin-top:20px; padding:15px; background:#f0f9ff; border-radius:6px; color:#0369a1; font-size:12px;">
-            <strong>💡 CTO Pro-Tip:</strong> This table combines WooCommerce sales history with Wallet activity. Use this to
-            spot your highest-value customers (Whales) and monitor for suspicious IP switching.
-        </div>
     </div>
     <?php
 }
-// ==================== 🔔 NOTIFICATION SENDER TAB ====================
-function mhjoy_render_alerts_tab()
-{
-    global $wpdb;
-    $table = $wpdb->prefix . 'mhjoy_notifications';
 
-    // Advanced Stats for Management
-    $total_broadcasts = $wpdb->get_var("SELECT COUNT(*) FROM $table WHERE user_id = 0");
-    $personal_alerts = $wpdb->get_var("SELECT COUNT(*) FROM $table WHERE user_id > 0");
-
-    // Search & Filter
-    $search = isset($_POST['alert_search']) ? sanitize_text_field($_POST['alert_search']) : '';
-    $query = "SELECT * FROM $table";
-    if ($search)
-        $query .= $wpdb->prepare(" WHERE title LIKE %s OR message LIKE %s", "%$search%", "%$search%");
-    $query .= " ORDER BY created_at DESC LIMIT 50";
-    $sent_alerts = $wpdb->get_results($query);
-
-    ?>
-    <div class="alert-management-grid" style="display: flex; gap: 25px; margin-top: 20px;">
-
-        <!-- SIDEBAR: SENDER CONSOLE -->
-        <div style="flex: 1; max-width: 400px;">
-            <div
-                style="background: #1e293b; color: white; padding: 25px; border-radius: 12px; box-shadow: 0 4px 15px rgba(0,0,0,0.1);">
-                <h3 style="margin:0 0 20px 0; display:flex; align-items:center; gap:10px;">
-                    <span style="font-size:24px;">📡</span> Dispatch Center
-                </h3>
-                <form method="post">
-                    <?php wp_nonce_field('mhjoy_send_alert_action'); ?>
-                    <div style="margin-bottom:15px;">
-                        <label
-                            style="display:block; font-size:11px; text-transform:uppercase; opacity:0.7;">Recipient</label>
-                        <input type="text" name="alert_target" placeholder="email or 'all'"
-                            style="width:100%; background:rgba(255,255,255,0.1); border:1px solid rgba(255,255,255,0.2); color:white; padding:10px; border-radius:6px;"
-                            required>
-                    </div>
-                    <div style="margin-bottom:15px;">
-                        <label style="display:block; font-size:11px; text-transform:uppercase; opacity:0.7;">Type</label>
-                        <select name="alert_type"
-                            style="width:100%; background:#0f172a; border:1px solid rgba(255,255,255,0.2); color:white; padding:10px; border-radius:6px;">
-                            <option value="info">Info (Blue)</option>
-                            <option value="success">Success (Green)</option>
-                            <option value="warning">Warning (Yellow)</option>
-                            <option value="error">Error (Red)</option>
-                        </select>
-                    </div>
-                    <div style="margin-bottom:15px;">
-                        <label style="display:block; font-size:11px; text-transform:uppercase; opacity:0.7;">Subject</label>
-                        <input type="text" name="alert_title"
-                            style="width:100%; background:rgba(255,255,255,0.1); border:1px solid rgba(255,255,255,0.2); color:white; padding:10px; border-radius:6px;"
-                            required>
-                    </div>
-                    <div style="margin-bottom:20px;">
-                        <label style="display:block; font-size:11px; text-transform:uppercase; opacity:0.7;">Message</label>
-                        <textarea name="alert_msg" rows="4"
-                            style="width:100%; background:rgba(255,255,255,0.1); border:1px solid rgba(255,255,255,0.2); color:white; padding:10px; border-radius:6px;"
-                            required></textarea>
-                    </div>
-                    <button type="submit" name="mhjoy_fire_alert"
-                        style="width:100%; padding:12px; background:#3b82f6; color:white; border:none; border-radius:6px; font-weight:bold; cursor:pointer;">
-                        🔥 Fire Notification</button>
-                </form>
-            </div>
-        </div>
-
-        <!-- MAIN: THE INTELLIGENCE LOG -->
-        <div style="flex: 2;">
-            <div style="background: white; padding: 25px; border-radius: 12px; box-shadow: 0 2px 5px rgba(0,0,0,0.05);">
-                <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:20px;">
-                    <h3 style="margin:0;">📜 Message Management Console</h3>
-                    <form method="post" style="display:flex; gap:5px;">
-                        <input type="text" name="alert_search" placeholder="Search content..."
-                            value="<?php echo esc_attr($search); ?>">
-                        <button class="button">Search</button>
-                    </form>
-                </div>
-
-                <table class="wp-list-table widefat fixed striped" style="border:none;">
-                    <thead>
-                        <tr>
-                            <th style="width:140px;">Timestamp</th>
-                            <th style="width:120px;">Audience</th>
-                            <th>Alert Details</th>
-                            <th style="width:100px;">Read Rate</th>
-                            <th style="width:100px;">Actions</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        <?php foreach ($sent_alerts as $a):
-                            $is_b = ($a->user_id == 0);
-                            // Read Stats Logic
-                            if ($is_b) {
-                                $read_count = $wpdb->get_var($wpdb->prepare("SELECT COUNT(*) FROM {$wpdb->prefix}usermeta WHERE meta_key = '_mhjoy_read_broadcasts' AND meta_value LIKE %s", '%"' . $a->id . '"%'));
-                                $total_users = count_users()['total_users'];
-                                $stat_label = "$read_count / $total_users";
-                            } else {
-                                $stat_label = ($a->is_read) ? '✅ Read' : '⏳ Sent';
-                            }
-                            $type_color = ($a->type == 'error') ? '#ef4444' : (($a->type == 'success') ? '#10b981' : '#3b82f6');
-                            ?>
-                            <tr>
-                                <td><small><?php echo date('M d, H:i', strtotime($a->created_at)); ?></small></td>
-                                <td>
-                                    <span
-                                        style="background:<?php echo $is_b ? '#6366f1' : '#64748b'; ?>; color:white; padding:2px 6px; border-radius:4px; font-size:9px; font-weight:bold; display:block; margin-bottom:5px; text-align:center;">
-                                        <?php echo $is_b ? '📢 BROADCAST' : '👤 PRIVATE'; ?>
-                                    </span>
-                                    <?php if (!$is_b):
-                                        $user_info = get_userdata($a->user_id);
-                                        if ($user_info): ?>
-                                            <div style="font-size:11px; color:#1e293b; word-break:break-all;">
-                                                <?php echo esc_html($user_info->user_email); ?>
-                                            </div>
-                                        <?php else: ?>
-                                            <small style="color:#ef4444;">User Deleted</small>
-                                        <?php endif;
-                                    endif; ?>
-                                </td>
-                                <td>
-                                    <div style="border-left: 3px solid <?php echo $type_color; ?>; padding-left: 10px;">
-                                        <strong><?php echo esc_html($a->title); ?></strong><br>
-                                        <small><?php echo wp_trim_words($a->message, 10); ?></small>
-                                    </div>
-                                </td>
-                                <td><small><?php echo $stat_label; ?></small></td>
-                                <td>
-                                    <div style="display:flex; gap:10px;">
-                                        <a href="#" style="color:#3b82f6; text-decoration:none;"
-                                            onclick="openEditNotif(<?php echo $a->id; ?>, '<?php echo esc_js($a->title); ?>', '<?php echo esc_js($a->message); ?>', '<?php echo $a->type; ?>'); return false;">Edit</a>
-                                        <form method="post" style="display:inline;" onsubmit="return confirm('Delete?');">
-                                            <?php wp_nonce_field('mhjoy_del_alert_action'); ?>
-                                            <input type="hidden" name="notif_id" value="<?php echo $a->id; ?>">
-                                            <button name="mhjoy_delete_alert" class="button-link"
-                                                style="color:#ef4444;">Revoke</button>
-                                        </form>
-                                    </div>
-                                </td>
-                            </tr>
-                        <?php endforeach; ?>
-                    </tbody>
-                </table>
-            </div>
-        </div>
-    </div>
-
-    <!-- EDIT MODAL -->
-    <div id="editNotifModal"
-        style="display:none; position:fixed; z-index:10001; left:0; top:0; width:100%; height:100%; background:rgba(0,0,0,0.6);">
-        <div style="background:white; margin:10% auto; padding:30px; width:500px; border-radius:12px;">
-            <h3>✏️ Edit Active Alert</h3>
-            <form method="post">
-                <?php wp_nonce_field('mhjoy_edit_alert_action'); ?>
-                <input type="hidden" id="edit_notif_id" name="notif_id">
-                <p><label>Type</label><br>
-                    <select name="edit_type" id="edit_notif_type" class="widefat">
-                        <option value="info">Info</option>
-                        <option value="success">Success</option>
-                        <option value="warning">Warning</option>
-                        <option value="error">Error</option>
-                    </select>
-                </p>
-                <p><label>Headline</label><input type="text" name="edit_title" id="edit_notif_title" class="widefat"></p>
-                <p><label>Message</label><textarea name="edit_msg" id="edit_notif_msg" rows="5" class="widefat"></textarea>
-                </p>
-                <div style="text-align:right;">
-                    <button type="button" class="button"
-                        onclick="document.getElementById('editNotifModal').style.display='none'">Cancel</button>
-                    <button type="submit" name="mhjoy_update_alert" class="button button-primary">Save Changes</button>
-                </div>
-            </form>
-        </div>
-    </div>
-
-    <script>
-        function openEditNotif(id, title, msg, type) {
-            document.getElementById('edit_notif_id').value = id;
-            document.getElementById('edit_notif_title').value = title;
-            document.getElementById('edit_notif_msg').value = msg;
-            document.getElementById('edit_notif_type').value = type;
-            document.getElementById('editNotifModal').style.display = 'block';
-        }
-    </script>
-    <?php
+function mhjoy_render_alerts_tab() {
+    // Stub for alarms/alerts tab
+    echo '<div class="wrap"><h2>🔔 Alerts System</h2><p>System alerts configuration...</p></div>';
 }
-?>

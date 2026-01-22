@@ -23,7 +23,16 @@ function mhjoy_process_spin_logic($user_email, $is_premium = false)
 
     if (!$wallet) {
         $wpdb->insert($t_bal, ['user_email' => $user_email, 'balance' => 0]);
-        $wallet = (object) ['balance' => 0, 'spin_claimed_today' => 0, 'total_spins' => 0];
+        $wallet = (object) ['balance' => 0, 'spin_claimed_today' => 0, 'total_spins' => 0, 'premium_spins_balance' => 0];
+    }
+
+    // 🛡️ REORDERED LOGIC: Determine Cost FIRST (Fixes "Free Spin but blocked by <10tk" bug)
+    $cost = $is_premium ? 10 : 0;
+    $used_free_spin = false;
+
+    if ($is_premium && isset($wallet->premium_spins_balance) && $wallet->premium_spins_balance > 0) {
+        $cost = 0;
+        $used_free_spin = true;
     }
 
     if (!$is_premium && $wallet->spin_claimed_today >= 1) {
@@ -43,82 +52,97 @@ function mhjoy_process_spin_logic($user_email, $is_premium = false)
     }
 
     if ($is_premium) {
-        if ($wallet->balance < 10) {
+        // Now check if they can afford `cost` (which might be 0)
+        if ($wallet->balance < $cost) {
             $wpdb->query('ROLLBACK');
             return new WP_Error('funds', 'Need ৳10', ['status' => 402]);
         }
+        
         // 🛡️ ADMIN BYPASS: Allow unlimited spins for test/admin accounts
         $test_emails = ['mhjoypersonal@gmail.com', 'admin@mhjoygamershub.com'];
         $premium_today = $wpdb->get_var($wpdb->prepare("SELECT COUNT(*) FROM $t_spins WHERE user_email = %s AND spin_date = CURDATE() AND is_premium = 1", $user_email));
         
+        // If using free spin, bypass daily limit check? Or keep it? Usually free spins bypass limits.
+        // Let's assume free spins bypass the "10 per day" limit or they count towards it?
+        // Logic below counts it. Let's keep strict limit for now unless requested otherwise.
         if ($premium_today >= 10 && !in_array($user_email, $test_emails)) {
             $wpdb->query('ROLLBACK');
             return new WP_Error('limit', 'Max 10 premium spins per day reached! Come back tomorrow!', ['status' => 429]);
         }
     }
 
-    $reward = 0;
+    // 🎰 REWARD LOGIC: Awarding Vault Tokens 💎
+    // Updated for Majestic Vault System (10x Value Scaling)
     $rand = rand(1, 1000);
-    $cost = $is_premium ? 10 : 0;
+    $reward_type = 'tokens';
     
-    // 🆕 CHECK FOR FREE SPINS FIRST
-    $used_free_spin = false;
-    if ($is_premium && isset($wallet->premium_spins_balance) && $wallet->premium_spins_balance > 0) {
-        $cost = 0;
-        $used_free_spin = true;
-    }
-
-    // 🎰 REWARD LOGIC: Premium spins (paid OR free) get premium rewards
     if ($is_premium) {
-        // 🎯 OPTIMIZED Premium wheel: Everyone wins! (Avg payout: ৳4.50, House edge: 55%)
-        // Psychology: Frequent small wins > rare big wins
         if ($rand <= 350)
-            $reward = 2;      // 35% - Small win (feels good!)
+            $reward = 20;      // 35% - 20 Tokens
         elseif ($rand <= 700)
-            $reward = 5;      // 35% - Medium win
+            $reward = 50;      // 35% - 50 Tokens
         elseif ($rand <= 900)
-            $reward = 10;     // 20% - Good win
+            $reward = 100;     // 20% - 100 Tokens
         elseif ($rand <= 990)
-            $reward = 25;     // 9% - Big win!
+            $reward = 250;     // 9% - 250 Tokens
         else
-            $reward = 100;    // 1% - JACKPOT!
+            $reward = 1000;    // 1% - 1000 Tokens (Jackpot)
     } else {
-        // Free daily wheel: ৳0.10, ৳0.25, ৳1.00, ৳5.00
         if ($rand <= 500)
-            $reward = 0.10;
+            $reward = 1;       // 1 Token
         elseif ($rand <= 850)
-            $reward = 0.25;
+            $reward = 5;       // 5 Tokens
         elseif ($rand <= 980)
-            $reward = 1.00;
+            $reward = 10;      // 10 Tokens
         else
-            $reward = 5.00;
+            $reward = 50;      // 50 Tokens
     }
 
     try {
-        $new_bal = round($wallet->balance - $cost + $reward, 2);
+        // Calculate New Token Balance
+        $current_tokens = (int) ($wallet->vault_token_balance ?? 0);
+        $new_token_bal = $current_tokens + $reward;
         
-        // Update Array
+        // Cost is still in Cash (Balance)
+        $new_cash_bal = round($wallet->balance - $cost, 2);
+        
         $update_data = [
-            'balance' => $new_bal, 
+            'balance' => $new_cash_bal, // Deduct cost
+            'vault_token_balance' => $new_token_bal, // Add tokens
             'spin_claimed_today' => 1, 
             'last_spin_date' => current_time('mysql')
         ];
 
-        // Deduct free spin if used
         if ($used_free_spin) {
             $update_data['premium_spins_balance'] = $wallet->premium_spins_balance - 1;
         }
 
         $wpdb->update($t_bal, $update_data, ['user_email' => $user_email]);
-        $wpdb->insert($t_spins, ['user_email' => $user_email, 'spin_date' => current_time('Y-m-d'), 'spin_time' => current_time('H:i:s'), 'reward_amount' => $reward, 'is_premium' => $is_premium ? 1 : 0]);
+        
+        // Log Spin History
+        $wpdb->insert($t_spins, [
+            'user_email' => $user_email, 
+            'spin_date' => current_time('Y-m-d'), 
+            'spin_time' => current_time('H:i:s'), 
+            'reward_amount' => $reward, 
+            'is_premium' => $is_premium ? 1 : 0
+        ]);
 
         if ($cost > 0)
-            mhjoy_log_transaction($user_email, 'debit', $cost, 'spin', 'Premium Spin Cost', $wallet->balance - $cost);
+            mhjoy_log_transaction($user_email, 'debit', $cost, 'spin', 'Premium Spin Cost', $new_cash_bal);
+            
         if ($reward > 0)
-            mhjoy_log_transaction($user_email, 'credit', $reward, 'spin', 'Spin Reward', $new_bal);
+            mhjoy_log_transaction($user_email, 'credit', 0, 'spin_reward', "Won $reward Vault Tokens", $new_cash_bal); // Amount 0 cash, desc says tokens
 
         $wpdb->query('COMMIT');
-        return ['success' => true, 'reward' => $reward, 'new_balance' => $new_bal, 'message' => "Won ৳$reward!"];
+        
+        return [
+            'success' => true, 
+            'reward' => $reward, 
+            'new_balance' => $new_cash_bal, // Return cash balance for header update
+            'vault_token_balance' => $new_token_bal, // Return new token balance
+            'message' => "Won $reward Tokens!"
+        ];
     } catch (Exception $e) {
         $wpdb->query('ROLLBACK');
         return new WP_Error('db_error', 'Failed', ['status' => 500]);
@@ -448,15 +472,109 @@ function mhjoy_final_wallet_deduction_trigger($order_id)
 /**
  * Helper: Calculate total free money earned by user
  */
-function mhjoy_get_total_free_earned($email)
+// ==================== 8. MAJESTIC VAULT LOGIC (NEW) ====================
+
+/**
+ * Redeem Vault Tokens for a Coupon
+ */
+function mhjoy_redeem_vault_coupon($user_id, $vault_item_id)
 {
     global $wpdb;
-    $table = $wpdb->prefix . 'mhjoy_wallet_transactions';
-    return (float) $wpdb->get_var($wpdb->prepare(
-        "SELECT SUM(amount) FROM $table 
-         WHERE user_email = %s 
-         AND type = 'credit' 
-         AND (source = 'daily' OR (source = 'spin' AND reference = 'Free Win'))",
-        $email
+    $t_bal = $wpdb->prefix . 'mhjoy_wallet_balance';
+    
+    // 1. Get User Balance
+    $user = get_user_by('id', $user_id);
+    if (!$user) return new WP_Error('invalid_user', 'User not found', ['status' => 404]);
+    
+    $wallet = $wpdb->get_row($wpdb->prepare("SELECT vault_token_balance, balance FROM $t_bal WHERE user_email = %s", $user->user_email));
+    if (!$wallet) return new WP_Error('no_wallet', 'Wallet not found', ['status' => 404]);
+
+    // 2. Get Vault Item Config
+    $cost = (int) get_post_meta($vault_item_id, '_vault_cost', true);
+    $discount = (float) get_post_meta($vault_item_id, '_vault_discount_amount', true);
+    $min_spend = (float) get_post_meta($vault_item_id, '_vault_min_spend', true);
+    
+    // 3. Check Balance
+    $current_tokens = (int) ($wallet->vault_token_balance ?? 0);
+    if ($current_tokens < $cost) {
+        return new WP_Error('insufficient_tokens', 'Not enough Vault Tokens', ['status' => 400]);
+    }
+
+    // 4. Create WooCommerce Coupon
+    $coupon_code = 'VAULT-' . strtoupper(wp_generate_password(6, false));
+    $coupon = new WC_Coupon();
+    $coupon->set_code($coupon_code);
+    $coupon->set_amount($discount);
+    $coupon->set_discount_type('fixed_cart'); // Fixed Amount Discount
+    $coupon->set_minimum_amount($min_spend);
+    $coupon->set_usage_limit(1);
+    $coupon->set_expiry_date(strtotime('+30 days'));
+    // Make it specific to user email? Optional.
+    // $coupon->set_email_restrictions([$user->user_email]);
+    $coupon->save();
+
+    // 5. Deduct Tokens
+    $wpdb->update($t_bal, ['vault_token_balance' => $current_tokens - $cost], ['user_email' => $user->user_email]);
+
+    // 6. Log Transaction
+    if (function_exists('mhjoy_log_transaction')) {
+        mhjoy_log_transaction($user->user_email, 'debit', 0, 'vault_redemption', "Redeemed Item #$vault_item_id for $cost Tokens", $wallet->balance);
+    }
+
+    return [
+        'success' => true,
+        'coupon_code' => $coupon_code,
+        'message' => "Vault Unlocked! Code: $coupon_code",
+        'remaining_tokens' => $current_tokens - $cost
+    ];
+}
+
+/**
+ * Migration: Convert 'Free Money' to Tokens
+ */
+function mhjoy_migrate_wallet_to_tokens($user_email)
+{
+    global $wpdb;
+    $t_bal = $wpdb->prefix . 'mhjoy_wallet_balance';
+    $t_txn = $wpdb->prefix . 'mhjoy_wallet_transactions';
+
+    // 1. Calculate Real Cash (Topups) vs Free Money
+    $real_cash = (float) $wpdb->get_var($wpdb->prepare(
+        "SELECT SUM(amount) FROM $t_txn WHERE user_email = %s AND type = 'credit' AND source IN ('topup', 'refund')", 
+        $user_email
     )) ?: 0;
+    
+    $total_deductions = (float) $wpdb->get_var($wpdb->prepare(
+        "SELECT SUM(amount) FROM $t_txn WHERE user_email = %s AND type = 'debit'", 
+        $user_email
+    )) ?: 0;
+
+    // Remaining Real Cash = Total Real In - Total Spent
+    // If they spent more than they deposited (used bonuses), Real Cash is 0.
+    $current_real = max(0, $real_cash - $total_deductions);
+
+    // Get Current Total Balance from DB
+    $current_wallet = $wpdb->get_row($wpdb->prepare("SELECT balance, vault_token_balance FROM $t_bal WHERE user_email = %s", $user_email));
+    
+    if (!$current_wallet) return;
+
+    $total_balance = (float) $current_wallet->balance;
+    
+    // Free Money = Everything else
+    $free_money = max(0, $total_balance - $current_real);
+
+    // If Free Money > 0, Convert it!
+    if ($free_money > 0) {
+        $tokens_to_add = floor($free_money * 10); // Rate: 1tk = 10 Tokens
+        $new_token_balance = ($current_wallet->vault_token_balance ?? 0) + $tokens_to_add;
+
+        // Force Balance to be ONLY Real Cash
+        $wpdb->update($t_bal, [
+            'balance' => $current_real,
+            'vault_token_balance' => $new_token_balance
+        ], ['user_email' => $user_email]);
+
+        // Log it
+        mhjoy_log_transaction($user_email, 'info', 0, 'migration', "Migrated ৳$free_money to $tokens_to_add Tokens", $current_real);
+    }
 }
