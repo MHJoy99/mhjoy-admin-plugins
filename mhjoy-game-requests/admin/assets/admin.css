@@ -1,0 +1,157 @@
+/* MHJoy Game Requests - Admin Styles */
+
+.mhjoy-gr-admin {
+    max-width: 1400px;
+}
+
+/* Stats Grid */
+.mhjoy-gr-stats-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+    gap: 20px;
+    margin: 20px 0;
+}
+
+.stat-card {
+    background: #fff;
+    border: 1px solid #c3c4c7;
+    border-radius: 8px;
+    padding: 20px;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+}
+
+.stat-card h3 {
+    margin: 0 0 10px 0;
+    font-size: 14px;
+    color: #646970;
+    text-transform: uppercase;
+    font-weight: 600;
+}
+
+.stat-value {
+    font-size: 36px;
+    font-weight: bold;
+    color: #1d2327;
+    margin: 10px 0;
+}
+
+.stat-meta {
+    display: flex;
+    gap: 15px;
+    font-size: 13px;
+    color: #646970;
+    margin-top: 10px;
+}
+
+.stat-meta .today {
+    color: #2271b1;
+}
+
+.stat-meta .week {
+    color: #00a32a;
+}
+
+.stat-meta .pro {
+    color: #d4af37;
+    font-weight: 600;
+}
+
+/* Charts */
+.mhjoy-gr-charts {
+    margin: 30px 0;
+}
+
+.chart-container {
+    background: #fff;
+    border: 1px solid #c3c4c7;
+    border-radius: 8px;
+    padding: 20px;
+    margin-bottom: 20px;
+}
+
+.chart-container h2 {
+    margin-top: 0;
+    font-size: 18px;
+    color: #1d2327;
+}
+
+.chart-container canvas {
+    max-height: 300px;
+}
+
+/* Tables */
+.mhjoy-gr-top-games,
+.mhjoy-gr-top-searches {
+    margin: 30px 0;
+}
+
+.mhjoy-gr-top-games h2,
+.mhjoy-gr-top-searches h2 {
+    font-size: 18px;
+    margin-bottom: 15px;
+}
+
+/* License Generator */
+.mhjoy-gr-license-generator {
+    background: #fff;
+    border: 1px solid #c3c4c7;
+    border-radius: 8px;
+    padding: 20px;
+    margin: 20px 0;
+}
+
+.mhjoy-gr-license-generator h2 {
+    margin-top: 0;
+    font-size: 16px;
+}
+
+.mhjoy-gr-license-generator form {
+    display: flex;
+    gap: 10px;
+    align-items: center;
+}
+
+/* Status Badges */
+.status-active {
+    color: #00a32a;
+    font-weight: 600;
+}
+
+.status-used {
+    color: #646970;
+}
+
+/* Buttons */
+.fulfill-game {
+    background: #00a32a !important;
+    border-color: #00a32a !important;
+    color: #fff !important;
+}
+
+.fulfill-game:hover {
+    background: #008a20 !important;
+    border-color: #008a20 !important;
+}
+
+.delete-game {
+    background: #d63638 !important;
+    border-color: #d63638 !important;
+    color: #fff !important;
+}
+
+.delete-game:hover {
+    background: #b32d2e !important;
+    border-color: #b32d2e !important;
+}
+
+/* Responsive */
+@media (max-width: 768px) {
+    .mhjoy-gr-stats-grid {
+        grid-template-columns: 1fr;
+    }
+
+    .stat-meta {
+        flex-direction: column;
+        gap: 5px;
+    }
+}
